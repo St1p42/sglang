@@ -960,7 +960,7 @@ class VanillaRadixCacheImpl(BasePrefixCache):
 
 class CustomRadixCacheImpl(VanillaRadixCacheImpl):
     def __init__(self, params: CacheInitParams):
-        logger.warning("[RADIX IMPL] CUSTOM RADIX_CACHE.PY")
+        logger.warning("[RADIX_CACHE_IMPL] CUSTOM RADIX_CACHE.PY")
         super().__init__(params)
 
 
@@ -968,11 +968,11 @@ class RadixCache(BasePrefixCache):
     def __init__(self, params: CacheInitParams):
         impl_name = getattr(params, "radix_cache_impl", "vanilla")
         if impl_name == "custom":
-            logger.warning("[RADIX IMPL] SELECTED custom")
+            logger.warning("[RADIX_CACHE_IMPL] SELECTED custom")
             self.impl = CustomRadixCacheImpl(params)
         else:
-            logger.warning("[RADIX IMPL] SELECTED vanilla")
-            logger.warning("[RADIX IMPL] VANILLA RADIX_CACHE.PY")
+            logger.warning("[RADIX_CACHE_IMPL] SELECTED vanilla")
+            logger.warning("[RADIX_CACHE_IMPL] VANILLA RADIX_CACHE.PY")
             self.impl = VanillaRadixCacheImpl(params)
 
     @classmethod
