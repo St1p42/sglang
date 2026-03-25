@@ -13,7 +13,10 @@ logger = logging.getLogger(__name__)
 
 class CustomRadixCacheImpl(BasePrefixCache):
     def __init__(self, params: CacheInitParams):
-        logger.warning("[RADIX_CACHE_IMPL] CUSTOM RADIX_CACHE.PY")
+        logger.warning(
+            "[RADIX_CACHE_IMPL] CUSTOM RADIX_CACHE.PY source=%s",
+            getattr(params, "radix_cache_source", "main"),
+        )
         self.impl = VanillaRadixCacheImpl(params)
 
     def __getattr__(self, name: str):
