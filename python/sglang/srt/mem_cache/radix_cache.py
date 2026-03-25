@@ -25,12 +25,22 @@ logger = logging.getLogger(__name__)
 class RadixCache(BasePrefixCache):
     def __init__(self, params: CacheInitParams):
         impl_name = getattr(params, "radix_cache_impl", "vanilla")
+        source = getattr(params, "radix_cache_source", "main")
         if impl_name == "custom":
-            logger.warning("[RADIX_CACHE_IMPL] SELECTED custom")
+            logger.warning(
+                "[RADIX_CACHE_IMPL] SELECTED custom source=%s",
+                source,
+            )
             self.impl = CustomRadixCacheImpl(params)
         else:
-            logger.warning("[RADIX_CACHE_IMPL] SELECTED vanilla")
-            logger.warning("[RADIX_CACHE_IMPL] VANILLA RADIX_CACHE.PY")
+            logger.warning(
+                "[RADIX_CACHE_IMPL] SELECTED vanilla source=%s",
+                source,
+            )
+            logger.warning(
+                "[RADIX_CACHE_IMPL] VANILLA RADIX_CACHE.PY source=%s",
+                source,
+            )
             self.impl = VanillaRadixCacheImpl(params)
 
     @classmethod
@@ -50,6 +60,7 @@ class RadixCache(BasePrefixCache):
             radix_cache_impl=radix_cache_impl,
             enable_kv_cache_events=enable_kv_cache_events,
         )
+        setattr(params, "radix_cache_source", "simulated")
         return cls(params)
 
     def __getattr__(self, name: str):
