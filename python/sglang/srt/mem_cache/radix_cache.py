@@ -249,7 +249,7 @@ def split_node_hash_value(
     return new_node_hash, child_hash
 
 
-class RadixCache(BasePrefixCache):
+class VanillaRadixCacheImpl(BasePrefixCache):
     def __init__(self, params: CacheInitParams):
         self.disable = params.disable
         self.req_to_token_pool = params.req_to_token_pool
@@ -309,7 +309,7 @@ class RadixCache(BasePrefixCache):
         mock_allocator: Optional[Any] = None,
         page_size: int = 1,
         enable_kv_cache_events: bool = False,
-    ) -> RadixCache:
+    ) -> "VanillaRadixCacheImpl":
         """Init a radix cache without memory pools for simulation purpose."""
         params = CacheInitParams(
             disable=disable,
@@ -318,7 +318,7 @@ class RadixCache(BasePrefixCache):
             page_size=page_size,
             enable_kv_cache_events=enable_kv_cache_events,
         )
-        return RadixCache(params)
+        return VanillaRadixCacheImpl(params)
 
     ##### Public API #####
 
@@ -956,6 +956,67 @@ class RadixCache(BasePrefixCache):
         events = self.kv_event_queue
         self.kv_event_queue = []
         return events
+
+
+class CustomRadixCacheImpl(VanillaRadixCacheImpl):
+    def __init__(self, params: CacheInitParams):
+        logger.warning("[RADIX IMPL] CUSTOM RADIX_CACHE.PY")
+        super().__init__(params)
+
+
+class RadixCache(BasePrefixCache):
+    def __init__(self, params: CacheInitParams):
+        impl_name = getattr(params, "radix_cache_impl", "vanilla")
+        if impl_name == "custom":
+            logger.warning("[RADIX IMPL] SELECTED custom")
+            self.impl = CustomRadixCacheImpl(params)
+        else:
+            logger.warning("[RADIX IMPL] SELECTED vanilla")
+            logger.warning("[RADIX IMPL] VANILLA RADIX_CACHE.PY")
+            self.impl = VanillaRadixCacheImpl(params)
+
+    @classmethod
+    def create_simulated(
+        cls,
+        disable: bool = False,
+        mock_allocator: Optional[Any] = None,
+        page_size: int = 1,
+        enable_kv_cache_events: bool = False,
+        radix_cache_impl: str = "vanilla",
+    ) -> "RadixCache":
+        params = CacheInitParams(
+            disable=disable,
+            req_to_token_pool=None,
+            token_to_kv_pool_allocator=mock_allocator,
+            page_size=page_size,
+            radix_cache_impl=radix_cache_impl,
+            enable_kv_cache_events=enable_kv_cache_events,
+        )
+        return cls(params)
+
+    def __getattr__(self, name: str):
+        return getattr(self.impl, name)
+
+    def reset(self):
+        return self.impl.reset()
+
+    def match_prefix(self, key: Any, **kwargs) -> MatchResult:
+        return self.impl.match_prefix(key, **kwargs)
+
+    def cache_finished_req(self, req: Req, is_insert: bool = True, **kwargs):
+        return self.impl.cache_finished_req(req, is_insert=is_insert, **kwargs)
+
+    def cache_unfinished_req(self, req: Req, **kwargs):
+        return self.impl.cache_unfinished_req(req, **kwargs)
+
+    def evict(self, num_tokens: int):
+        return self.impl.evict(num_tokens)
+
+    def inc_lock_ref(self, node: Any):
+        return self.impl.inc_lock_ref(node)
+
+    def dec_lock_ref(self, node: Any, swa_uuid_for_lock: Optional[str] = None):
+        return self.impl.dec_lock_ref(node)
 
 
 if __name__ == "__main__":

@@ -280,6 +280,7 @@ class ServerArgs:
     swa_full_tokens_ratio: float = 0.8
     disable_hybrid_swa_memory: bool = False
     radix_eviction_policy: str = "lru"
+    radix_cache_impl: str = "vanilla"
 
     # Runtime options
     device: Optional[str] = None
@@ -3401,6 +3402,13 @@ class ServerArgs:
             "--disable-radix-cache",
             action="store_true",
             help="Disable RadixAttention for prefix caching.",
+        )
+        parser.add_argument(
+            "--radix-cache-impl",
+            type=str,
+            default=ServerArgs.radix_cache_impl,
+            choices=["vanilla", "custom"],
+            help="Choose the radix cache implementation to use.",
         )
         parser.add_argument(
             "--cuda-graph-max-bs",

@@ -717,6 +717,7 @@ class Scheduler(
             req_to_token_pool=self.req_to_token_pool,
             token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
             page_size=self.page_size,
+            radix_cache_impl=server_args.radix_cache_impl,
             is_eagle=self.spec_algorithm.is_eagle(),
             tp_cache_group=(
                 self.attn_tp_cpu_group
