@@ -1018,6 +1018,21 @@ class RadixCache(BasePrefixCache):
     def dec_lock_ref(self, node: Any, swa_uuid_for_lock: Optional[str] = None):
         return self.impl.dec_lock_ref(node)
 
+    def evictable_size(self):
+        return self.impl.evictable_size()
+
+    def protected_size(self):
+        return self.impl.protected_size()
+
+    def total_size(self):
+        return self.impl.total_size()
+
+    def pretty_print(self):
+        return self.impl.pretty_print()
+
+    def take_events(self):
+        return self.impl.take_events()
+
 
 if __name__ == "__main__":
     tree = RadixCache.create_simulated()
