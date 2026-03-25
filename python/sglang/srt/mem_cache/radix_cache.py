@@ -294,7 +294,7 @@ class RadixCache(BasePrefixCache):
                 f"Unknown eviction policy: {self.eviction_policy}. Supported policies: 'lru', 'lfu', 'fifo', 'mru', 'filo', 'priority'."
             )
         self.reset()
-        logger.info(
+        logger.warning(
             "[RADIX TRACE] init disable=%s page_size=%s is_eagle=%s eviction_policy=%s",
             self.disable,
             self.page_size,
@@ -384,7 +384,7 @@ class RadixCache(BasePrefixCache):
         """
         key, _ = self.maybe_bigram_convert(key)
         rid = kwargs.get("rid")
-        logger.info(
+        logger.warning(
             "[RADIX TRACE] match_prefix:start rid=%s key_len=%s disable=%s page_size=%s extra_key=%s",
             rid,
             len(key),
@@ -405,7 +405,7 @@ class RadixCache(BasePrefixCache):
             )
 
         if self.disable or len(key) == 0:
-            logger.info(
+            logger.warning(
                 "[RADIX TRACE] match_prefix:end rid=%s matched_len=0 reason=%s",
                 rid,
                 "disabled_or_empty",
@@ -417,7 +417,7 @@ class RadixCache(BasePrefixCache):
             key = key[:page_aligned_len]
 
         if len(key) == 0:
-            logger.info(
+            logger.warning(
                 "[RADIX TRACE] match_prefix:end rid=%s matched_len=0 reason=page_aligned_empty",
                 rid,
             )
@@ -428,7 +428,7 @@ class RadixCache(BasePrefixCache):
             value = torch.cat(value)
         else:
             value = torch.empty((0,), dtype=torch.int64, device=self.device)
-        logger.info(
+        logger.warning(
             "[RADIX TRACE] match_prefix:end rid=%s matched_len=%s last_node_id=%s",
             rid,
             len(value),
@@ -442,7 +442,7 @@ class RadixCache(BasePrefixCache):
 
     def insert(self, key: RadixKey, value=None, chunked=False, priority: int = 0):
         if self.disable:
-            logger.info(
+            logger.warning(
                 "[RADIX TRACE] insert skip key_len=%s reason=disabled",
                 len(key),
             )
@@ -452,7 +452,7 @@ class RadixCache(BasePrefixCache):
             value = torch.tensor(key.token_ids, dtype=torch.int64)
 
         key, value = self.maybe_bigram_convert(key, value)
-        logger.info(
+        logger.warning(
             "[RADIX TRACE] insert:start key_len=%s value_len=%s chunked=%s priority=%s extra_key=%s",
             len(key),
             len(value),
@@ -462,7 +462,7 @@ class RadixCache(BasePrefixCache):
         )
 
         inserted_len = self._insert_helper(self.root_node, key, value, priority)
-        logger.info(
+        logger.warning(
             "[RADIX TRACE] insert:end inserted_len=%s",
             inserted_len,
         )
@@ -481,7 +481,7 @@ class RadixCache(BasePrefixCache):
             is_insert = False
 
         kv_committed_len = req.pop_committed_kv_cache()
-        logger.info(
+        logger.warning(
             "[RADIX TRACE] cache_finished_req:start rid=%s committed_len=%s old_prefix=%s cache_protected_len=%s is_insert=%s disable=%s",
             req.rid,
             kv_committed_len,
@@ -496,7 +496,7 @@ class RadixCache(BasePrefixCache):
             ]
             self.token_to_kv_pool_allocator.free(kv_indices)
             self.req_to_token_pool.free(req.req_pool_idx)
-            logger.info(
+            logger.warning(
                 "[RADIX TRACE] cache_finished_req:end rid=%s mode=disabled freed_len=%s",
                 req.rid,
                 len(kv_indices),
@@ -533,7 +533,7 @@ class RadixCache(BasePrefixCache):
         # Remove req slot release the cache lock
         self.req_to_token_pool.free(req.req_pool_idx)
         self.dec_lock_ref(req.last_node)
-        logger.info(
+        logger.warning(
             "[RADIX TRACE] cache_finished_req:end rid=%s final_token_ids=%s last_node_id=%s",
             req.rid,
             len(token_ids),
@@ -542,7 +542,7 @@ class RadixCache(BasePrefixCache):
 
     def cache_unfinished_req(self, req: Req, chunked=False):
         """Cache request when it is unfinished."""
-        logger.info(
+        logger.warning(
             "[RADIX TRACE] cache_unfinished_req:start rid=%s fill_len=%s old_prefix=%s cache_protected_len=%s chunked=%s disable=%s",
             req.rid,
             len(req.fill_ids),
@@ -552,7 +552,7 @@ class RadixCache(BasePrefixCache):
             self.disable,
         )
         if self.disable:
-            logger.info(
+            logger.warning(
                 "[RADIX TRACE] cache_unfinished_req:end rid=%s reason=disabled",
                 req.rid,
             )
@@ -599,7 +599,7 @@ class RadixCache(BasePrefixCache):
         # It should be freed in the next cache_unfinished_req and final cache_finished_req to avoid memory leak.
         # So we introduce this `cache_protected_len` field to make sure the partial part can be freed correctly.
         req.cache_protected_len = len(new_indices)
-        logger.info(
+        logger.warning(
             "[RADIX TRACE] cache_unfinished_req:end rid=%s new_prefix=%s cache_protected_len=%s last_node_id=%s",
             req.rid,
             len(req.prefix_indices),
@@ -631,13 +631,13 @@ class RadixCache(BasePrefixCache):
 
     def evict(self, num_tokens: int):
         if self.disable:
-            logger.info(
+            logger.warning(
                 "[RADIX TRACE] evict skip num_tokens=%s reason=disabled",
                 num_tokens,
             )
             return
 
-        logger.info(
+        logger.warning(
             "[RADIX TRACE] evict:start num_tokens=%s evictable=%s protected=%s",
             num_tokens,
             self.evictable_size_,
@@ -665,7 +665,7 @@ class RadixCache(BasePrefixCache):
             self._record_remove_event(x)
 
         self.update_eviction_metrics(num_evicted, start_time)
-        logger.info(
+        logger.warning(
             "[RADIX TRACE] evict:end requested=%s evicted=%s evictable=%s protected=%s",
             num_tokens,
             num_evicted,
@@ -675,7 +675,7 @@ class RadixCache(BasePrefixCache):
 
     def inc_lock_ref(self, node: TreeNode):
         if self.disable:
-            logger.info("[RADIX TRACE] inc_lock_ref skip reason=disabled")
+            logger.warning("[RADIX TRACE] inc_lock_ref skip reason=disabled")
             return 0
 
         node_id = getattr(node, "id", None)
@@ -687,7 +687,7 @@ class RadixCache(BasePrefixCache):
                 delta -= len(node.key)
             node.lock_ref += 1
             node = node.parent
-        logger.info(
+        logger.warning(
             "[RADIX TRACE] inc_lock_ref node_id=%s delta=%s evictable=%s protected=%s",
             node_id,
             delta,
@@ -698,7 +698,7 @@ class RadixCache(BasePrefixCache):
 
     def dec_lock_ref(self, node: TreeNode):
         if self.disable:
-            logger.info("[RADIX TRACE] dec_lock_ref skip reason=disabled")
+            logger.warning("[RADIX TRACE] dec_lock_ref skip reason=disabled")
             return 0
 
         node_id = getattr(node, "id", None)
@@ -714,7 +714,7 @@ class RadixCache(BasePrefixCache):
                     node is self.root_node
                 ), f"This request holds the node from another tree"
             node = node.parent
-        logger.info(
+        logger.warning(
             "[RADIX TRACE] dec_lock_ref node_id=%s delta=%s evictable=%s protected=%s",
             node_id,
             delta,
