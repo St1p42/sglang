@@ -10,6 +10,12 @@ from sglang.srt.mem_cache.radix_cache_vanilla import (
     RadixKey,
     TreeNode,
     VanillaRadixCacheImpl,
+    _check_extra_key,
+    _key_match_page_size1,
+    _key_match_paged,
+    compute_node_hash_values,
+    get_child_key,
+    split_node_hash_value,
 )
 
 
