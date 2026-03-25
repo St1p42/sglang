@@ -3,48 +3,18 @@ from __future__ import annotations
 import logging
 from typing import Any, Optional
 
-from sglang.srt.mem_cache.base_prefix_cache import BasePrefixCache, MatchResult
 from sglang.srt.mem_cache.cache_init_params import CacheInitParams
-from sglang.srt.mem_cache.radix_cache_custom import CustomRadixCacheImpl
-from sglang.srt.mem_cache.radix_cache_vanilla import (
-    RadixKey,
-    TreeNode,
-    VanillaRadixCacheImpl,
-)
+from sglang.srt.mem_cache.base_prefix_cache import BasePrefixCache, MatchResult
+from sglang.srt.mem_cache.radix_cache_vanilla import VanillaRadixCacheImpl
 
 
 logger = logging.getLogger(__name__)
 
 
-class RadixCache(BasePrefixCache):
+class CustomRadixCacheImpl(BasePrefixCache):
     def __init__(self, params: CacheInitParams):
-        impl_name = getattr(params, "radix_cache_impl", "vanilla")
-        if impl_name == "custom":
-            logger.warning("[RADIX_CACHE_IMPL] SELECTED custom")
-            self.impl = CustomRadixCacheImpl(params)
-        else:
-            logger.warning("[RADIX_CACHE_IMPL] SELECTED vanilla")
-            logger.warning("[RADIX_CACHE_IMPL] VANILLA RADIX_CACHE.PY")
-            self.impl = VanillaRadixCacheImpl(params)
-
-    @classmethod
-    def create_simulated(
-        cls,
-        disable: bool = False,
-        mock_allocator: Optional[Any] = None,
-        page_size: int = 1,
-        enable_kv_cache_events: bool = False,
-        radix_cache_impl: str = "vanilla",
-    ) -> "RadixCache":
-        params = CacheInitParams(
-            disable=disable,
-            req_to_token_pool=None,
-            token_to_kv_pool_allocator=mock_allocator,
-            page_size=page_size,
-            radix_cache_impl=radix_cache_impl,
-            enable_kv_cache_events=enable_kv_cache_events,
-        )
-        return cls(params)
+        logger.warning("[RADIX_CACHE_IMPL] CUSTOM RADIX_CACHE.PY")
+        self.impl = VanillaRadixCacheImpl(params)
 
     def __getattr__(self, name: str):
         return getattr(self.impl, name)
