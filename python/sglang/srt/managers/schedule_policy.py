@@ -15,12 +15,15 @@ from __future__ import annotations
 # ==============================================================================
 """Request scheduler policy"""
 
+import logging
 import os
 import random
 from collections import defaultdict
 from contextlib import contextmanager
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Dict, List, Optional, Set, Union
+
+logger = logging.getLogger(__name__)
 
 import torch
 
@@ -134,6 +137,15 @@ class SchedulePolicy:
                 SchedulePolicy._sort_randomly(waiting_queue)
             else:
                 raise ValueError(f"Unknown CacheAgnostic Policy: {policy=}")
+
+        # Scheduling trace: log top requests after priority computation
+        top = waiting_queue[:5]
+        logger.warning(
+            "[SCHED TRACE] after_calc_priority policy=%s top=%s",
+            policy.value,
+            [(r.rid, len(getattr(r, "prefix_indices", []))) for r in top],
+        )
+
         return prefix_computed
 
     def _determine_active_policy(self, waiting_queue: List[Req]) -> Policy:

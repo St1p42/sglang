@@ -1488,6 +1488,13 @@ class Scheduler(
             self.waiting_queue.append(req)
             req.time_stats.wait_queue_entry_time = time.perf_counter()
             trace_slice_end(RequestStage.REQUEST_PROCESS, req.rid, auto_next_anon=True)
+            # Scheduling trace: log request enqueue event
+            logger.warning(
+                "[SCHED TRACE] enqueue rid=%s policy=%s queue_len=%d",
+                req.rid,
+                self.schedule_policy,
+                len(self.waiting_queue),
+            )
         elif self.disaggregation_mode == DisaggregationMode.PREFILL:
             self._prefetch_kvcache(req)
             self.disagg_prefill_bootstrap_queue.add(
@@ -1894,6 +1901,14 @@ class Scheduler(
             )
         else:
             new_batch.decoding_reqs = None
+
+        # Scheduling trace: log batch formation (which requests were selected)
+        logger.warning(
+            "[SCHED TRACE] new_batch size=%d policy=%s rids=%s",
+            len(can_run_list),
+            self.schedule_policy,
+            [req.rid for req in can_run_list],
+        )
 
         return new_batch
 
