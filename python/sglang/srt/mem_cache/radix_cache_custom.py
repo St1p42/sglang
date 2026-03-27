@@ -377,6 +377,11 @@ class CustomRadixCacheImpl(BasePrefixCache):
         If a matched node remains an evictable leaf after access, it is a good
         candidate to `touch` in the leaf-LRU structure.
         """
+        logger.warning(
+            "[CUSTOM RADIX TRACE] lookup:start key_len=%s extra_key=%s",
+            len(key),
+            key.extra_key,
+        )
         node = self.root_node
         path: list[_CustomRadixNode] = []
         remaining = key.token_ids
@@ -395,6 +400,11 @@ class CustomRadixCacheImpl(BasePrefixCache):
             remaining = remaining[prefix_len:]
 
         self._refresh_path_access(path)
+        logger.warning(
+            "[CUSTOM RADIX TRACE] lookup:end matched_len=%s last_segment_len=%s",
+            len(self._collect_path_kv(path)),
+            0 if node is self.root_node else len(node.token_segment),
+        )
         return self._collect_path_kv(path), node
 
     def _insert_prefix(
@@ -420,6 +430,12 @@ class CustomRadixCacheImpl(BasePrefixCache):
         - a node that gains a child stops being a leaf and should leave LRU
         - a newly created cacheable leaf may need to enter LRU if unlocked
         """
+        logger.warning(
+            "[CUSTOM RADIX TRACE] insert:start key_len=%s value_len=%s extra_key=%s",
+            len(key),
+            len(value),
+            key.extra_key,
+        )
         if len(key) != len(value):
             raise ValueError(
                 f"Custom radix insertion requires aligned token/KV spans, got {len(key)=} and {len(value)=}"
@@ -443,6 +459,11 @@ class CustomRadixCacheImpl(BasePrefixCache):
                 )
                 path.append(new_leaf)
                 self._refresh_path_access(path)
+                logger.warning(
+                    "[CUSTOM RADIX TRACE] insert:end matched_prefix_len=%s inserted_suffix_len=%s mode=new-leaf",
+                    matched_len,
+                    len(new_leaf.token_segment),
+                )
                 return matched_len, new_leaf
 
             prefix_len = self._lcp_len(child.token_segment, remaining_tokens)
@@ -472,12 +493,27 @@ class CustomRadixCacheImpl(BasePrefixCache):
                 )
                 path.append(new_leaf)
                 self._refresh_path_access(path)
+                logger.warning(
+                    "[CUSTOM RADIX TRACE] insert:end matched_prefix_len=%s inserted_suffix_len=%s mode=split-and-append",
+                    matched_len,
+                    len(new_leaf.token_segment),
+                )
                 return matched_len, new_leaf
 
             self._refresh_path_access(path)
+            logger.warning(
+                "[CUSTOM RADIX TRACE] insert:end matched_prefix_len=%s inserted_suffix_len=%s mode=split-exact",
+                matched_len,
+                0,
+            )
             return matched_len, split_node
 
         self._refresh_path_access(path)
+        logger.warning(
+            "[CUSTOM RADIX TRACE] insert:end matched_prefix_len=%s inserted_suffix_len=%s mode=full-match",
+            matched_len,
+            0,
+        )
         return matched_len, node
 
     def insert(self, key: RadixKey, value=None, **kwargs) -> int:
@@ -520,10 +556,19 @@ class CustomRadixCacheImpl(BasePrefixCache):
         In other words, this method should translate your internal lookup result
         into the `MatchResult` shape the runtime already knows how to consume.
         """
+        logger.warning(
+            "[CUSTOM RADIX TRACE] match_prefix:start key_len=%s disable=%s",
+            len(key),
+            self.disable,
+        )
         if self.disable or len(key) == 0:
             return self._empty_match_result()
 
         matched_indices, last_node = self._lookup_longest_prefix(key)
+        logger.warning(
+            "[CUSTOM RADIX TRACE] match_prefix:end matched_len=%s",
+            len(matched_indices),
+        )
         return MatchResult(
             device_indices=matched_indices,
             last_device_node=last_node,
@@ -550,6 +595,15 @@ class CustomRadixCacheImpl(BasePrefixCache):
         does not require you to mirror SGLang's internal sequence of steps.
         """
         kv_committed_len = req.pop_committed_kv_cache()
+        logger.warning(
+            "[CUSTOM RADIX TRACE] cache_finished_req:start rid=%s committed_len=%s old_prefix=%s cache_protected_len=%s is_insert=%s disable=%s",
+            req.rid,
+            kv_committed_len,
+            len(req.prefix_indices),
+            req.cache_protected_len,
+            is_insert,
+            self.disable,
+        )
 
         if self.disable:
             kv_indices = self.req_to_token_pool.req_to_token[
@@ -557,6 +611,11 @@ class CustomRadixCacheImpl(BasePrefixCache):
             ]
             self.token_to_kv_pool_allocator.free(kv_indices)
             self.req_to_token_pool.free(req.req_pool_idx)
+            logger.warning(
+                "[CUSTOM RADIX TRACE] cache_finished_req:end rid=%s mode=disabled freed_len=%s",
+                req.rid,
+                len(kv_indices),
+            )
             return
 
         token_ids = (req.origin_input_ids + req.output_ids)[:kv_committed_len]
@@ -581,6 +640,12 @@ class CustomRadixCacheImpl(BasePrefixCache):
         if req.last_node is not None:
             self.dec_lock_ref(req.last_node)
         req.last_node = new_last_node
+        logger.warning(
+            "[CUSTOM RADIX TRACE] cache_finished_req:end rid=%s final_token_ids=%s last_segment_len=%s",
+            req.rid,
+            len(token_ids),
+            0 if new_last_node is self.root_node else len(new_last_node.token_segment),
+        )
 
     def cache_unfinished_req(self, req, **kwargs):
         """Make the current request prefix visible in the radix tree early.
@@ -612,7 +677,19 @@ class CustomRadixCacheImpl(BasePrefixCache):
         That protection handoff may also imply leaf-LRU updates, because a node
         becoming protected should generally stop being evictable.
         """
+        logger.warning(
+            "[CUSTOM RADIX TRACE] cache_unfinished_req:start rid=%s fill_len=%s old_prefix=%s cache_protected_len=%s disable=%s",
+            req.rid,
+            len(req.fill_ids),
+            len(req.prefix_indices),
+            req.cache_protected_len,
+            self.disable,
+        )
         if self.disable:
+            logger.warning(
+                "[CUSTOM RADIX TRACE] cache_unfinished_req:end rid=%s reason=disabled",
+                req.rid,
+            )
             return
 
         token_ids = req.fill_ids
@@ -651,6 +728,13 @@ class CustomRadixCacheImpl(BasePrefixCache):
             self.inc_lock_ref(new_last_node)
 
         req.last_node = new_last_node
+        logger.warning(
+            "[CUSTOM RADIX TRACE] cache_unfinished_req:end rid=%s new_prefix=%s cache_protected_len=%s last_segment_len=%s",
+            req.rid,
+            len(req.prefix_indices),
+            req.cache_protected_len,
+            0 if new_last_node is self.root_node else len(new_last_node.token_segment),
+        )
 
     def evict(self, num_tokens: int):
         """Evict cached radix-tree entries when memory pressure requires it.
@@ -667,7 +751,14 @@ class CustomRadixCacheImpl(BasePrefixCache):
 
         The natural driver for this method is `_CustomLeafLru.pop_oldest()`.
         """
+        logger.warning(
+            "[CUSTOM RADIX TRACE] evict:start num_tokens=%s evictable=%s protected=%s",
+            num_tokens,
+            self.evictable_size_,
+            self.protected_size_,
+        )
         if self.disable:
+            logger.warning("[CUSTOM RADIX TRACE] evict:end reason=disabled")
             return
 
         start_time = time.perf_counter()
@@ -685,6 +776,13 @@ class CustomRadixCacheImpl(BasePrefixCache):
                 self._update_leaf_lru_membership(parent)
 
         self.update_eviction_metrics(num_evicted, start_time)
+        logger.warning(
+            "[CUSTOM RADIX TRACE] evict:end requested=%s evicted=%s evictable=%s protected=%s",
+            num_tokens,
+            num_evicted,
+            self.evictable_size_,
+            self.protected_size_,
+        )
 
     def inc_lock_ref(self, node: Any):
         """Mark a matched prefix as protected.
@@ -700,9 +798,11 @@ class CustomRadixCacheImpl(BasePrefixCache):
         it should usually be removed from that LRU structure.
         """
         if self.disable or node is None or node is self.root_node:
+            logger.warning("[CUSTOM RADIX TRACE] inc_lock_ref skip")
             return 0
 
         delta = 0
+        node_segment_len = len(node.token_segment)
         cur = node
         while cur is not None and cur is not self.root_node:
             if cur.lock_ref == 0:
@@ -712,6 +812,13 @@ class CustomRadixCacheImpl(BasePrefixCache):
                 self.leaf_lru.remove(cur)
             cur.lock_ref += 1
             cur = cur.parent
+        logger.warning(
+            "[CUSTOM RADIX TRACE] inc_lock_ref node_segment_len=%s delta=%s evictable=%s protected=%s",
+            node_segment_len,
+            delta,
+            self.evictable_size_,
+            self.protected_size_,
+        )
         return delta
 
     def dec_lock_ref(self, node: Any, swa_uuid_for_lock: Optional[str] = None):
@@ -725,9 +832,11 @@ class CustomRadixCacheImpl(BasePrefixCache):
         the leaf-LRU structure.
         """
         if self.disable or node is None or node is self.root_node:
+            logger.warning("[CUSTOM RADIX TRACE] dec_lock_ref skip")
             return 0
 
         delta = 0
+        node_segment_len = len(node.token_segment)
         cur = node
         while cur is not None and cur is not self.root_node:
             if cur.lock_ref <= 0:
@@ -739,6 +848,13 @@ class CustomRadixCacheImpl(BasePrefixCache):
             cur.lock_ref -= 1
             self._update_leaf_lru_membership(cur)
             cur = cur.parent
+        logger.warning(
+            "[CUSTOM RADIX TRACE] dec_lock_ref node_segment_len=%s delta=%s evictable=%s protected=%s",
+            node_segment_len,
+            delta,
+            self.evictable_size_,
+            self.protected_size_,
+        )
         return delta
 
     def evictable_size(self):
