@@ -59,10 +59,10 @@ def build_sglang_lm(args):
 def main(args):
     lm = build_sglang_lm(args)
 
-    colbertv2_wiki17_abstracts = dspy.ColBERTv2(
-        url="http://20.102.90.50:2017/wiki17_abstracts"
-    )
-    dspy.settings.configure(lm=lm, rm=colbertv2_wiki17_abstracts)
+    rm = None
+    if args.rm_url:
+        rm = dspy.ColBERTv2(url=args.rm_url)
+    dspy.settings.configure(lm=lm, rm=rm)
 
     dataset = HotPotQA(
         train_seed=1, train_size=20, eval_seed=2023, dev_size=args.dev_size, test_size=0
@@ -107,46 +107,58 @@ def main(args):
         print("Thought: <not exposed by this DSPy version>")
     print(f"Predicted Answer: {pred.answer}")
 
-    retrieve = dspy.Retrieve(k=3)
-    topK_passages = retrieve(dev_example.question).passages
-    print(
-        f"Top {retrieve.k} passages for question: {dev_example.question} \n",
-        "-" * 30,
-        "\n",
-    )
+    if rm is None:
+        print("Retriever: disabled (no --rm-url provided)")
+        return
 
-    for idx, passage in enumerate(topK_passages):
-        print(f"{idx+1}]", passage, "\n")
+    try:
+        retrieve = dspy.Retrieve(k=3)
+        topK_passages = retrieve(dev_example.question).passages
+        print(
+            f"Top {retrieve.k} passages for question: {dev_example.question} \n",
+            "-" * 30,
+            "\n",
+        )
 
-    retrieve("When was the first FIFA World Cup held?").passages[0]
+        for idx, passage in enumerate(topK_passages):
+            print(f"{idx+1}]", passage, "\n")
 
-    from dspy.teleprompt import BootstrapFewShot
+        retrieve("When was the first FIFA World Cup held?").passages[0]
 
-    def validate_context_and_answer(example, pred, trace=None):
-        answer_EM = dspy.evaluate.answer_exact_match(example, pred)
-        answer_PM = dspy.evaluate.answer_passage_match(example, pred)
-        return answer_EM and answer_PM
+        from dspy.teleprompt import BootstrapFewShot
 
-    teleprompter = BootstrapFewShot(metric=validate_context_and_answer)
-    compiled_rag = teleprompter.compile(RAG(), trainset=trainset)
+        def validate_context_and_answer(example, pred, trace=None):
+            answer_EM = dspy.evaluate.answer_exact_match(example, pred)
+            answer_PM = dspy.evaluate.answer_passage_match(example, pred)
+            return answer_EM and answer_PM
 
-    my_question = "What castle did David Gregory inherit?"
-    pred = compiled_rag(my_question)
-    print(f"Question: {my_question}")
-    print(f"Predicted Answer: {pred.answer}")
-    print(f"Retrieved Contexts (truncated): {[c[:200] + '...' for c in pred.context]}")
+        teleprompter = BootstrapFewShot(metric=validate_context_and_answer)
+        compiled_rag = teleprompter.compile(RAG(), trainset=trainset)
 
-    from dspy.evaluate.evaluate import Evaluate
+        my_question = "What castle did David Gregory inherit?"
+        pred = compiled_rag(my_question)
+        print(f"Question: {my_question}")
+        print(f"Predicted Answer: {pred.answer}")
+        print(
+            f"Retrieved Contexts (truncated): {[c[:200] + '...' for c in pred.context]}"
+        )
 
-    evaluate_on_hotpotqa = Evaluate(
-        devset=devset,
-        num_threads=args.num_threads,
-        display_progress=True,
-        display_table=5,
-    )
+        from dspy.evaluate.evaluate import Evaluate
 
-    metric = dspy.evaluate.answer_exact_match
-    evaluate_on_hotpotqa(compiled_rag, metric=metric)
+        evaluate_on_hotpotqa = Evaluate(
+            devset=devset,
+            num_threads=args.num_threads,
+            display_progress=True,
+            display_table=5,
+        )
+
+        metric = dspy.evaluate.answer_exact_match
+        evaluate_on_hotpotqa(compiled_rag, metric=metric)
+    except Exception as exc:
+        if args.allow_rm_failure:
+            print(f"Retriever: unavailable, skipping RAG stages ({type(exc).__name__}: {exc})")
+            return
+        raise
 
 
 if __name__ == "__main__":
@@ -155,6 +167,12 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=30000)
     parser.add_argument("--api-key", type=str, default="local")
     parser.add_argument("--model", type=str, required=True)
+    parser.add_argument(
+        "--rm-url",
+        type=str,
+        default="http://20.102.90.50:2017/wiki17_abstracts",
+    )
+    parser.add_argument("--allow-rm-failure", action="store_true")
     parser.add_argument("--num-threads", type=int, default=32)
     parser.add_argument("--dev-size", type=int, default=150)
     args = parser.parse_args()
