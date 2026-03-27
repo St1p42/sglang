@@ -99,7 +99,12 @@ def main(args):
     generate_answer_with_chain_of_thought = dspy.ChainOfThought(BasicQA)
     pred = generate_answer_with_chain_of_thought(question=dev_example.question)
     print(f"Question: {dev_example.question}")
-    print(f"Thought: {pred.rationale.split('.', 1)[1].strip()}")
+    rationale = getattr(pred, "rationale", None)
+    if rationale is not None:
+        thought = rationale.split(".", 1)[1].strip() if "." in rationale else rationale
+        print(f"Thought: {thought}")
+    else:
+        print("Thought: <not exposed by this DSPy version>")
     print(f"Predicted Answer: {pred.answer}")
 
     retrieve = dspy.Retrieve(k=3)
