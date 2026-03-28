@@ -130,6 +130,7 @@ from sglang.srt.managers.schedule_policy import (
     AddReqResult,
     PrefillAdder,
     SchedulePolicy,
+    create_schedule_policy,
 )
 from sglang.srt.managers.scheduler_dp_attn_mixin import SchedulerDPAttnMixin
 from sglang.srt.managers.scheduler_input_blocker import SchedulerInputBlocker
@@ -478,12 +479,13 @@ class Scheduler(
             self.grammar_backend = None
 
         # Init schedule policy and new token estimation
-        self.policy = SchedulePolicy(
+        self.policy = create_schedule_policy(
             self.schedule_policy,
             self.tree_cache,
             self.enable_hierarchical_cache,
             self.enable_priority_scheduling,
             self.schedule_low_priority_values_first,
+            cache_aware_scheduling=server_args.cache_aware_scheduling,
         )
         # Enable preemption for priority scheduling.
         self.try_preemption = self.enable_priority_scheduling
