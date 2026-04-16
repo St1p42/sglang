@@ -16,6 +16,7 @@ class CacheInitParams:
     req_to_token_pool: ReqToTokenPool
     token_to_kv_pool_allocator: BaseTokenToKVPoolAllocator
     page_size: int
+    radix_cache_impl: str = "vanilla"
 
     is_eagle: bool = False
     tp_cache_group: Optional[torch.distributed.ProcessGroup] = None
