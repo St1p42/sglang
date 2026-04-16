@@ -270,6 +270,7 @@ class ServerArgs:
     chunked_prefill_size: Optional[int] = None
     max_prefill_tokens: int = 16384
     schedule_policy: str = "fcfs"
+    cache_aware_scheduling: str = "vanilla"
     enable_priority_scheduling: bool = False
     abort_on_priority_when_disabled: bool = False
     schedule_low_priority_values_first: bool = False
@@ -2330,6 +2331,14 @@ class ServerArgs:
             default=ServerArgs.schedule_policy,
             choices=["lpm", "random", "fcfs", "dfs-weight", "lof", "priority"],
             help="The scheduling policy of the requests.",
+        )
+        parser.add_argument(
+            "--cache-aware-scheduling",
+            type=str,
+            default=ServerArgs.cache_aware_scheduling,
+            choices=["vanilla", "custom", "base"],
+            help="Cache-aware scheduling implementation: "
+            "vanilla=original policy, custom=simplified LPM, base=pure FCFS.",
         )
         parser.add_argument(
             "--enable-priority-scheduling",

@@ -15,12 +15,15 @@ from __future__ import annotations
 # ==============================================================================
 """Request scheduler policy"""
 
+import logging
 import os
 import random
 from collections import defaultdict
 from contextlib import contextmanager
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Dict, List, Optional, Set, Union
+
+logger = logging.getLogger(__name__)
 
 import torch
 
@@ -134,6 +137,15 @@ class SchedulePolicy:
                 SchedulePolicy._sort_randomly(waiting_queue)
             else:
                 raise ValueError(f"Unknown CacheAgnostic Policy: {policy=}")
+
+        # Scheduling trace: log top requests after priority computation
+        top = waiting_queue[:5]
+        logger.warning(
+            "[SCHED TRACE] after_calc_priority policy=%s top=%s",
+            policy.value,
+            [(r.rid, len(getattr(r, "prefix_indices", []))) for r in top],
+        )
+
         return prefix_computed
 
     def _determine_active_policy(self, waiting_queue: List[Req]) -> Policy:
@@ -723,3 +735,37 @@ class PrefillAdder:
         self.running_batch.filter_batch(keep_indices=keep_indices)
         self.preempt_list.extend(preemptible_reqs)
         return True
+
+
+def create_schedule_policy(
+    policy: str,
+    tree_cache: BasePrefixCache,
+    enable_hierarchical_cache: bool,
+    enable_priority_scheduling: bool,
+    schedule_low_priority_values_first: bool,
+    cache_aware_scheduling: str = "vanilla",
+):
+    """Factory that routes to the right scheduler based on --cache-aware-scheduling.
+
+    vanilla → original SchedulePolicy (completely unchanged)
+    custom  → SimpleLPMScheduler (our simplified LPM reproduction)
+    base    → BaseFIFOScheduler (pure FCFS, no prefix matching)
+    """
+    if cache_aware_scheduling == "custom":
+        from sglang.srt.managers.simple_lpm_scheduler import SimpleLPMScheduler
+
+        return SimpleLPMScheduler(tree_cache)
+
+    if cache_aware_scheduling == "base":
+        from sglang.srt.managers.simple_lpm_scheduler import BaseFIFOScheduler
+
+        return BaseFIFOScheduler()
+
+    # "vanilla" — original logic, no changes
+    return SchedulePolicy(
+        policy,
+        tree_cache,
+        enable_hierarchical_cache,
+        enable_priority_scheduling,
+        schedule_low_priority_values_first,
+    )
