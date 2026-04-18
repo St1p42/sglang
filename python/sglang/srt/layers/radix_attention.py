@@ -8,7 +8,7 @@ from .custom_radix_attention import RadixAttention as CustomRadixAttention
 
 class RadixAttention(nn.Module):
     def __new__(cls, *args, **kwargs):
-        radix_cache_impl = kwargs.pop("radix_cache_impl", "disable")
+        radix_cache_impl = kwargs.pop("radix_cache_impl", "vanilla")
 
         if radix_cache_impl == "custom":
             print("Routing to Custom Radix Attention")
