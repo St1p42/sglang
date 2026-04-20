@@ -50,8 +50,8 @@ def _get_global_radix_attention_impl() -> str:
         return "vanilla"
 
 
-def _resolve_radix_attention_impl(explicit_impl: Optional[str]) -> str:
-    impl_name = explicit_impl or _get_global_radix_attention_impl()
+def _resolve_radix_attention_impl() -> str:
+    impl_name = _get_global_radix_attention_impl()
     impl_name = impl_name.lower()
     if impl_name not in ("vanilla", "custom"):
         raise ValueError(
@@ -102,9 +102,8 @@ class RadixAttention(nn.Module):
         attn_type: AttentionType = AttentionType.DECODER,
         use_irope: bool = False,
         prefix: str = "",
-        radix_cache_impl: Optional[str] = None,
     ):
-        impl_name = _resolve_radix_attention_impl(radix_cache_impl)
+        impl_name = _resolve_radix_attention_impl()
         impl_cls = _load_radix_attention_impl(impl_name)
 
         logger.info("Using %s radix attention implementation.", impl_name)
