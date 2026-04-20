@@ -130,6 +130,7 @@ from sglang.srt.managers.schedule_policy import (
     AddReqResult,
     PrefillAdder,
     SchedulePolicy,
+    create_schedule_policy,
 )
 from sglang.srt.managers.scheduler_dp_attn_mixin import SchedulerDPAttnMixin
 from sglang.srt.managers.scheduler_input_blocker import SchedulerInputBlocker
@@ -478,12 +479,13 @@ class Scheduler(
             self.grammar_backend = None
 
         # Init schedule policy and new token estimation
-        self.policy = SchedulePolicy(
+        self.policy = create_schedule_policy(
             self.schedule_policy,
             self.tree_cache,
             self.enable_hierarchical_cache,
             self.enable_priority_scheduling,
             self.schedule_low_priority_values_first,
+            cache_aware_scheduling=server_args.cache_aware_scheduling,
         )
         # Enable preemption for priority scheduling.
         self.try_preemption = self.enable_priority_scheduling
@@ -717,6 +719,7 @@ class Scheduler(
             req_to_token_pool=self.req_to_token_pool,
             token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
             page_size=self.page_size,
+            radix_cache_impl=server_args.radix_cache_impl,
             is_eagle=self.spec_algorithm.is_eagle(),
             tp_cache_group=(
                 self.attn_tp_cpu_group
@@ -1488,6 +1491,13 @@ class Scheduler(
             self.waiting_queue.append(req)
             req.time_stats.wait_queue_entry_time = time.perf_counter()
             trace_slice_end(RequestStage.REQUEST_PROCESS, req.rid, auto_next_anon=True)
+            # Scheduling trace: log request enqueue event
+            logger.warning(
+                "[SCHED TRACE] enqueue rid=%s policy=%s queue_len=%d",
+                req.rid,
+                self.schedule_policy,
+                len(self.waiting_queue),
+            )
         elif self.disaggregation_mode == DisaggregationMode.PREFILL:
             self._prefetch_kvcache(req)
             self.disagg_prefill_bootstrap_queue.add(
@@ -1894,6 +1904,14 @@ class Scheduler(
             )
         else:
             new_batch.decoding_reqs = None
+
+        # Scheduling trace: log batch formation (which requests were selected)
+        logger.warning(
+            "[SCHED TRACE] new_batch size=%d policy=%s rids=%s",
+            len(can_run_list),
+            self.schedule_policy,
+            [req.rid for req in can_run_list],
+        )
 
         return new_batch
 
