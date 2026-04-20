@@ -29,6 +29,17 @@ python3 bench_sglang.py --num-questions 60
 python3 bench_sglang.py --num-questions 60 --backend gpt-4-vision-preview
 ```
 
+### Benchmark sglang with serving metrics
+Launch a server
+```
+python3 -m sglang.launch_server --model-path liuhaotian/llava-v1.6-vicuna-7b --tokenizer-path llava-hf/llava-1.5-7b-hf --port 30000
+```
+
+Run benchmark
+```
+python3 bench_sglang_serving.py --tokenizer llava-hf/llava-1.5-7b-hf --num-questions 60
+```
+
 ### Bench LLaVA original code
 ```
 git clone git@github.com:haotian-liu/LLaVA.git
