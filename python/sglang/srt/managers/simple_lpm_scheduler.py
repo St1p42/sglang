@@ -13,6 +13,8 @@ from __future__ import annotations
 import logging
 from typing import List
 
+import torch
+
 from sglang.srt.managers.schedule_batch import Req
 from sglang.srt.mem_cache.base_prefix_cache import BasePrefixCache
 from sglang.srt.mem_cache.radix_cache import RadixKey
@@ -20,6 +22,16 @@ from sglang.srt.mem_cache.radix_cache import RadixKey
 logger = logging.getLogger(__name__)
 
 FCFS_FALLBACK_THRESHOLD = 128
+
+
+def _clear_prefix_state(waiting_queue: List[Req]) -> None:
+    """Reset prefix metadata to defaults so stale values from a previous
+    scheduling round cannot leak into a fallback FCFS path."""
+    for r in waiting_queue:
+        r.prefix_indices = torch.empty((0,), dtype=torch.int64)
+        r.last_node = None
+        r.last_host_node = None
+        r.host_hit_length = 0
 
 
 class SimpleLPMScheduler:
@@ -46,6 +58,7 @@ class SimpleLPMScheduler:
             return False
 
         if not self._should_run_prefix_matching(waiting_queue):
+            _clear_prefix_state(waiting_queue)
             logger.warning(
                 "[CUSTOM SCHED] queue_len=%d > %d, FCFS fallback",
                 len(waiting_queue),
@@ -92,6 +105,7 @@ class BaseFIFOScheduler:
 
     def calc_priority(self, waiting_queue: List[Req]) -> bool:
         """No-op: keeps arrival order. Returns False (no prefix info computed)."""
+        _clear_prefix_state(waiting_queue)
         logger.warning(
             "[CUSTOM SCHED] base FCFS, queue_len=%d",
             len(waiting_queue),
