@@ -1,18 +1,21 @@
 import argparse
 import asyncio
 import json
+import mimetypes
 import os
 import time
 from dataclasses import asdict
 from typing import List, Tuple
 
 import aiohttp
-from transformers import AutoTokenizer
+from PIL import Image
+from transformers import AutoProcessor
 
 from sglang.bench_serving import (
     DatasetRow,
     RequestFuncOutput,
     calculate_metrics,
+    create_mm_data_row,
     remove_prefix,
 )
 from sglang.utils import encode_image_base64, read_jsonl
@@ -41,25 +44,30 @@ def parse_args():
     return parser.parse_args()
 
 
-def build_prompt(question: str, image_token: str) -> str:
-    return f"{image_token}\n{question}"
+def build_data_uri(image_file: str) -> str:
+    mime_type, _ = mimetypes.guess_type(image_file)
+    if mime_type is None:
+        mime_type = "image/jpeg"
+    return f"data:{mime_type};base64,{encode_image_base64(image_file)}"
 
 
-def load_requests(args, tokenizer):
+def load_requests(args, processor):
     lines = list(read_jsonl(args.question_file))[: args.num_questions]
     input_requests = []
     image_data = []
 
     for line in lines:
         image_file = os.path.abspath(os.path.join(args.image_folder, line["image"]))
-        prompt = build_prompt(line["text"], args.image_token)
-        prompt_len = len(tokenizer(prompt).input_ids)
+        image = Image.open(image_file).convert("RGB")
+        image_data_uri = build_data_uri(image_file)
         input_requests.append(
-            DatasetRow(
-                prompt=prompt,
-                prompt_len=prompt_len,
+            create_mm_data_row(
+                text_prompt=line["text"],
+                images=[image],
+                images_base64=[image_data_uri],
                 output_len=args.max_new_tokens,
-                image_data=[encode_image_base64(image_file)],
+                processor=processor,
+                backend="sglang",
             )
         )
         image_data.append(
@@ -236,11 +244,21 @@ def write_answers(args, image_data, outputs):
 
 def main():
     args = parse_args()
-    tokenizer = AutoTokenizer.from_pretrained(
+    processor = AutoProcessor.from_pretrained(
         args.tokenizer, trust_remote_code=args.trust_remote_code
     )
-    input_requests, image_data = load_requests(args, tokenizer)
+    tokenizer = processor.tokenizer if hasattr(processor, "tokenizer") else processor
+    input_requests, image_data = load_requests(args, processor)
     outputs, cached_tokens, duration = asyncio.run(run_all(args, input_requests))
+
+    successful_outputs = [output for output in outputs if output.success]
+    if not successful_outputs:
+        print("All image benchmark requests failed.")
+        print("Sample request errors:")
+        for idx, output in enumerate(outputs[:5]):
+            print(f"  request_{idx}: {output.error}")
+        write_answers(args, image_data, outputs)
+        return
 
     metrics, output_lens = calculate_metrics(
         input_requests=input_requests,
