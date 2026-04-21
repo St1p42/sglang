@@ -8,6 +8,7 @@ from dataclasses import asdict
 from typing import Dict, List, Tuple
 
 import aiohttp
+import numpy as np
 from PIL import Image
 import requests
 from transformers import AutoProcessor
@@ -21,6 +22,18 @@ from sglang.bench_serving import (
 from sglang.utils import encode_image_base64, read_jsonl
 
 AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
+
+
+def to_jsonable(value):
+    if isinstance(value, dict):
+        return {k: to_jsonable(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [to_jsonable(v) for v in value]
+    if isinstance(value, tuple):
+        return [to_jsonable(v) for v in value]
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
 
 
 def parse_args():
@@ -160,6 +173,7 @@ async def async_request_sglang_generate(
     generated_text = ""
     cached_tokens = 0
     prompt_tokens = request.prompt_len
+    saw_text_chunk = False
     st = time.perf_counter()
     output.start_time = st
     most_recent_timestamp = st
@@ -186,6 +200,7 @@ async def async_request_sglang_generate(
                 if not text:
                     continue
 
+                saw_text_chunk = True
                 timestamp = time.perf_counter()
                 generated_text = text
                 meta_info = data.get("meta_info") or {}
@@ -205,11 +220,16 @@ async def async_request_sglang_generate(
                 last_output_len = output.output_len
 
             output.generated_text = generated_text
-            output.success = True
             output.latency = time.perf_counter() - st
             output.prompt_len = prompt_tokens
-            if output.output_len == 0:
+            if output.output_len == 0 and saw_text_chunk:
                 output.output_len = request.output_len
+            if saw_text_chunk:
+                output.success = True
+            else:
+                output.success = False
+                output.output_len = 0
+                output.error = "Server returned 200 OK but emitted no text tokens."
             return output, cached_tokens
     except Exception as e:
         output.success = False
@@ -358,11 +378,11 @@ def main():
     }
 
     with open(args.result_file, "a") as fout:
-        fout.write(json.dumps(result) + "\n")
+        fout.write(json.dumps(to_jsonable(result)) + "\n")
 
     if args.raw_result_file:
         with open(args.raw_result_file, "w") as fout:
-            json.dump(result, fout, indent=2)
+            json.dump(to_jsonable(result), fout, indent=2)
 
 
 if __name__ == "__main__":
