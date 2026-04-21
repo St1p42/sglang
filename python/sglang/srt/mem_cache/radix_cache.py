@@ -27,12 +27,14 @@ class RadixCache(BasePrefixCache):
         impl_name = getattr(params, "radix_cache_impl", "vanilla")
         source = getattr(params, "radix_cache_source", "main")
         if impl_name == "custom":
+            print("we are in custom radix cache", flush=True)
             logger.warning(
                 "[RADIX_CACHE_IMPL] SELECTED custom source=%s",
                 source,
             )
             self.impl = CustomRadixCacheImpl(params)
         else:
+            print("we are in else vanilla radix cache", flush=True)
             logger.warning(
                 "[RADIX_CACHE_IMPL] SELECTED vanilla source=%s",
                 source,

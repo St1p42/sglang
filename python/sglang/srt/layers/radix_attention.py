@@ -63,12 +63,14 @@ def _resolve_radix_attention_impl() -> str:
 
 def _load_radix_attention_impl(impl_name: str):
     if impl_name == "custom":
+        print("we are in custom radix attention", flush=True)
         from sglang.srt.layers.custom_radix_attention import (
             RadixAttention as CustomRadixAttention,
         )
 
         return CustomRadixAttention
 
+    print("we are in else vanilla radix attention", flush=True)
     from sglang.srt.layers.vanilla_radix_attention import (
         RadixAttention as VanillaRadixAttention,
     )
