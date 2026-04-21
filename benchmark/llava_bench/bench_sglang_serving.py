@@ -5,17 +5,17 @@ import mimetypes
 import os
 import time
 from dataclasses import asdict
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 import aiohttp
 from PIL import Image
+import requests
 from transformers import AutoProcessor
 
 from sglang.bench_serving import (
     DatasetRow,
     RequestFuncOutput,
     calculate_metrics,
-    create_mm_data_row,
     remove_prefix,
 )
 from sglang.utils import encode_image_base64, read_jsonl
@@ -51,35 +51,88 @@ def build_data_uri(image_file: str) -> str:
     return f"data:{mime_type};base64,{encode_image_base64(image_file)}"
 
 
+def fetch_server_model_info(args) -> Dict:
+    response = requests.get(f"http://{args.host}:{args.port}/get_model_info", timeout=30)
+    response.raise_for_status()
+    return response.json()
+
+
+def build_prompt_and_token_counts(
+    args, processor, image: Image.Image, image_data_uri: str, question: str
+):
+    try:
+        content_items = [
+            {"type": "image", "image": {"url": image_data_uri}},
+            {"type": "text", "text": question},
+        ]
+        prompt_str = processor.apply_chat_template(
+            [{"role": "user", "content": content_items}],
+            add_generation_prompt=True,
+            tokenize=False,
+        )
+    except Exception:
+        prompt_str = f"{args.image_token}\n{question}"
+
+    prompt_len = processor(
+        text=[prompt_str],
+        images=[image],
+        padding=False,
+        return_tensors="pt",
+    )["input_ids"].numel()
+
+    try:
+        text_only_prompt = processor.apply_chat_template(
+            [{"role": "user", "content": question}],
+            add_generation_prompt=True,
+            tokenize=False,
+        )
+        text_prompt_len = processor(
+            text=[text_only_prompt],
+            padding=False,
+            return_tensors="pt",
+        )["input_ids"].numel()
+    except Exception:
+        tokenizer = processor.tokenizer if hasattr(processor, "tokenizer") else processor
+        text_prompt_len = len(tokenizer.encode(question))
+
+    return prompt_str, prompt_len, text_prompt_len, prompt_len - text_prompt_len
+
+
 def load_requests(args, processor):
     lines = list(read_jsonl(args.question_file))[: args.num_questions]
     input_requests = []
-    image_data = []
+    question_metadata = []
 
     for line in lines:
         image_file = os.path.abspath(os.path.join(args.image_folder, line["image"]))
         image = Image.open(image_file).convert("RGB")
         image_data_uri = build_data_uri(image_file)
-        input_requests.append(
-            create_mm_data_row(
-                text_prompt=line["text"],
-                images=[image],
-                images_base64=[image_data_uri],
-                output_len=args.max_new_tokens,
-                processor=processor,
-                backend="sglang",
+        prompt_str, prompt_len, text_prompt_len, vision_prompt_len = (
+            build_prompt_and_token_counts(
+                args, processor, image, image_data_uri, line["text"]
             )
         )
-        image_data.append(
+        input_requests.append(
+            DatasetRow(
+                prompt=prompt_str,
+                prompt_len=prompt_len,
+                output_len=args.max_new_tokens,
+                text_prompt_len=text_prompt_len,
+                vision_prompt_len=vision_prompt_len,
+                image_data=[image_data_uri],
+            )
+        )
+        question_metadata.append(
             {
                 "question_id": line["question_id"],
                 "image": line["image"],
-                "prompt": line["text"],
+                "question": line["text"],
+                "prompt": prompt_str,
                 "category": line.get("category"),
             }
         )
 
-    return input_requests, image_data
+    return input_requests, question_metadata
 
 
 async def async_request_sglang_generate(
@@ -116,7 +169,7 @@ async def async_request_sglang_generate(
         async with session.post(url=url, json=payload) as response:
             if response.status != 200:
                 output.success = False
-                output.error = response.reason or ""
+                output.error = await response.text()
                 return output, cached_tokens
 
             async for chunk_bytes in response.content:
@@ -223,20 +276,21 @@ def print_metrics(metrics, cache_hit_rate):
     print("=" * 50)
 
 
-def write_answers(args, image_data, outputs):
+def write_answers(args, question_metadata, outputs, model_id: str):
     with open(args.answer_file, "w") as fout:
-        for i, (item, output) in enumerate(zip(image_data, outputs)):
+        for i, (item, output) in enumerate(zip(question_metadata, outputs)):
             value = {
                 "question_id": item["question_id"],
-                "prompt": item["prompt"],
+                "prompt": item["question"],
                 "text": output.generated_text.strip() if output.success else "",
-                "model_id": "sglang",
+                "model_id": model_id,
                 "answer_id": i,
                 "metadata": {
                     "success": output.success,
                     "error": output.error,
                     "category": item["category"],
                     "image": item["image"],
+                    "serving_prompt": item["prompt"],
                 },
             }
             fout.write(json.dumps(value) + "\n")
@@ -244,11 +298,12 @@ def write_answers(args, image_data, outputs):
 
 def main():
     args = parse_args()
+    model_info = fetch_server_model_info(args)
     processor = AutoProcessor.from_pretrained(
         args.tokenizer, trust_remote_code=args.trust_remote_code
     )
     tokenizer = processor.tokenizer if hasattr(processor, "tokenizer") else processor
-    input_requests, image_data = load_requests(args, processor)
+    input_requests, question_metadata = load_requests(args, processor)
     outputs, cached_tokens, duration = asyncio.run(run_all(args, input_requests))
 
     successful_outputs = [output for output in outputs if output.success]
@@ -257,7 +312,7 @@ def main():
         print("Sample request errors:")
         for idx, output in enumerate(outputs[:5]):
             print(f"  request_{idx}: {output.error}")
-        write_answers(args, image_data, outputs)
+        write_answers(args, question_metadata, outputs, model_info["model_path"])
         return
 
     metrics, output_lens = calculate_metrics(
@@ -277,10 +332,11 @@ def main():
     )
 
     print_metrics(metrics, cache_hit_rate)
-    write_answers(args, image_data, outputs)
+    write_answers(args, question_metadata, outputs, model_info["model_path"])
 
     result = {
         "task": "llava_bench_serving",
+        "model_path": model_info["model_path"],
         "host": args.host,
         "port": args.port,
         "num_requests": len(input_requests),
@@ -297,7 +353,7 @@ def main():
             "cached_tokens": cached_tokens,
             "answers": [output.generated_text for output in outputs],
             "errors": [output.error for output in outputs],
-            "questions": image_data,
+            "questions": question_metadata,
         },
     }
 
