@@ -14,6 +14,15 @@ python -m sglang.launch_server --model-path meta-llama/Llama-2-7b-chat-hf --port
 python3 bench_sglang.py --nsub 10
 ```
 
+### Benchmark sglang with serving metrics
+```
+python -m sglang.launch_server --model-path meta-llama/Llama-2-7b-chat-hf --port 30000
+```
+
+```
+python3 bench_sglang_serving.py --tokenizer meta-llama/Llama-2-7b-chat-hf --nsub 10
+```
+
 ```
 # OpenAI models
 python3 bench_sglang.py --backend gpt-3.5-turbo --parallel 8

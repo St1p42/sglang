@@ -752,16 +752,19 @@ def create_schedule_policy(
     base    → BaseFIFOScheduler (pure FCFS, no prefix matching)
     """
     if cache_aware_scheduling == "custom":
+        print("we are in custom cache aware scheduling", flush=True)
         from sglang.srt.managers.simple_lpm_scheduler import SimpleLPMScheduler
 
         return SimpleLPMScheduler(tree_cache)
 
     if cache_aware_scheduling == "base":
+        print("we are in base cache aware scheduling", flush=True)
         from sglang.srt.managers.simple_lpm_scheduler import BaseFIFOScheduler
 
         return BaseFIFOScheduler()
 
     # "vanilla" — original logic, no changes
+    print("we are in else vanilla cache aware scheduling", flush=True)
     return SchedulePolicy(
         policy,
         tree_cache,

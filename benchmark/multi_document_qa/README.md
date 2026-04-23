@@ -9,6 +9,15 @@ python3 -m sglang.launch_server --model-path codellama/CodeLlama-7b-instruct-hf 
 python3 bench_sglang.py --num-questions 10 --parallel 1
 ```
 
+### Benchmark sglang with serving metrics
+```
+python3 -m sglang.launch_server --model-path codellama/CodeLlama-7b-instruct-hf --port 30000
+```
+
+```
+python3 bench_sglang_serving.py --tokenizer codellama/CodeLlama-7b-instruct-hf --num-questions 10 --parallel 1
+```
+
 
 ### Benchmark vllm
 ```

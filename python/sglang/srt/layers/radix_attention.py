@@ -11,21 +11,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""Radix attention."""
+"""Radix attention implementation router."""
+
 from __future__ import annotations
 
+import logging
 from enum import Enum
 from typing import TYPE_CHECKING, Optional
 
-import torch
 from torch import nn
-
-from sglang.srt.compilation.piecewise_context_manager import get_forward_context
-from sglang.srt.utils import direct_register_custom_op
 
 if TYPE_CHECKING:
     from sglang.srt.layers.quantization.base_config import QuantizationConfig
-    from sglang.srt.model_executor.forward_batch_info import ForwardBatch
+
+logger = logging.getLogger(__name__)
 
 
 class AttentionType(Enum):
@@ -36,17 +35,60 @@ class AttentionType(Enum):
 
     # Decoder attention between previous layer Q/K/V
     DECODER = "decoder"
+    # Decoder bidirectional attention between image tokens
+    DECODER_BIDIRECTIONAL = "decoder_bidirectional"
     # Encoder attention between previous layer Q/K/V
     ENCODER_ONLY = "encoder_only"
 
 
+def _get_global_radix_attention_impl() -> str:
+    try:
+        from sglang.srt.server_args import get_global_server_args
+
+        return getattr(get_global_server_args(), "radix_cache_impl", "vanilla")
+    except Exception:
+        return "vanilla"
+
+
+def _resolve_radix_attention_impl() -> str:
+    impl_name = _get_global_radix_attention_impl()
+    impl_name = impl_name.lower()
+    if impl_name not in ("vanilla", "custom"):
+        raise ValueError(
+            f"Unsupported radix attention implementation: {impl_name}. "
+            "Expected 'vanilla' or 'custom'."
+        )
+    return impl_name
+
+
+def _load_radix_attention_impl(impl_name: str):
+    if impl_name == "custom":
+        print("we are in custom radix attention", flush=True)
+        from sglang.srt.layers.custom_radix_attention import (
+            RadixAttention as CustomRadixAttention,
+        )
+
+        return CustomRadixAttention
+
+    print("we are in else vanilla radix attention", flush=True)
+    from sglang.srt.layers.vanilla_radix_attention import (
+        RadixAttention as VanillaRadixAttention,
+    )
+
+    return VanillaRadixAttention
+
+
 class RadixAttention(nn.Module):
-    """
-    The attention layer implementation.
+    """Route the original RadixAttention constructor to the selected implementation.
+
+    Many model files import ``RadixAttention`` from this module. Keeping this
+    public class as the entrypoint lets those imports stay unchanged while the
+    selected implementation lives in either ``vanilla_radix_attention.py`` or
+    ``custom_radix_attention.py``.
     """
 
-    def __init__(
-        self,
+    def __new__(
+        cls,
         num_heads: int,
         head_dim: int,
         scaling: float,
@@ -63,128 +105,24 @@ class RadixAttention(nn.Module):
         use_irope: bool = False,
         prefix: str = "",
     ):
-        super().__init__()
-        self.tp_q_head_num = num_heads
-        self.tp_k_head_num = num_kv_heads
-        self.tp_v_head_num = num_kv_heads
-        self.head_dim = head_dim
-        self.qk_head_dim = head_dim
-        self.v_head_dim = v_head_dim if v_head_dim != -1 else head_dim
-        self.scaling = scaling
-        self.layer_id = layer_id
-        self.logit_cap = logit_cap
-        self.sliding_window_size = sliding_window_size or -1
-        self.is_cross_attention = is_cross_attention
-        self.use_irope = use_irope
-        self.k_scale = None
-        self.v_scale = None
-        self.k_scale_float = None
-        self.v_scale_float = None
-        self.quant_method = None
+        impl_name = _resolve_radix_attention_impl()
+        impl_cls = _load_radix_attention_impl(impl_name)
 
-        if quant_config is not None:
-            self.quant_method = quant_config.get_quant_method(self, prefix=prefix)
-        if self.quant_method is not None:
-            self.quant_method.create_weights(self)
-        self.attn_type = attn_type
-
-        self.pos_encoding_mode = pos_encoding_mode
-        self.logit_capping_method = logit_capping_method
-        self.xai_temperature_len = -1
-
-    def forward(
-        self,
-        q,
-        k,
-        v,
-        forward_batch: ForwardBatch,
-        save_kv_cache: bool = True,
-        **kwargs,
-    ):
-        if k is not None:
-            # For cross-layer sharing, kv can be None
-            assert v is not None
-            if "k_rope" not in kwargs:
-                k = k.view(-1, self.tp_k_head_num, self.qk_head_dim)
-                v = v.view(-1, self.tp_v_head_num, self.v_head_dim)
-            else:
-                k = k.view(-1, self.tp_k_head_num, self.v_head_dim)
-
-        if forward_batch.forward_mode.is_extend() and get_forward_context() is not None:
-            if self.qk_head_dim != self.v_head_dim:
-                output = q.new_empty((q.shape[0], self.tp_q_head_num * self.v_head_dim))
-            else:
-                output = torch.empty_like(q)
-            torch.ops.sglang.unified_attention_with_output(
-                q, k, v, output, save_kv_cache, self.layer_id, **kwargs
-            )
-            return output
-        else:
-            return forward_batch.attn_backend.forward(
-                q,
-                k,
-                v,
-                self,
-                forward_batch,
-                save_kv_cache,
-                **kwargs,
-            )
-
-
-def unified_attention_with_output(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    output: torch.Tensor,
-    save_kv_cache: bool,
-    layer_id: int,
-    *,
-    q_rope: Optional[torch.Tensor] = None,
-    k_rope: Optional[torch.Tensor] = None,
-    sinks: Optional[torch.Tensor] = None,
-) -> None:
-    context = get_forward_context()
-    forward_batch = context.forward_batch
-    attention_layers = context.attention_layers
-    attention_layer = attention_layers[layer_id]
-
-    kwargs = {}
-    if q_rope is not None:
-        kwargs["q_rope"] = q_rope
-    if k_rope is not None:
-        kwargs["k_rope"] = k_rope
-    if sinks is not None:
-        kwargs["sinks"] = sinks
-
-    ret = forward_batch.attn_backend.forward(
-        query, key, value, attention_layer, forward_batch, save_kv_cache, **kwargs
-    )
-    assert (
-        output.numel() == ret.numel()
-    ), f"Output tensor element mismatch: {output.numel()} != {ret.numel()}"
-
-    output.view(ret.shape).copy_(ret)
-    return
-
-
-def unified_attention_with_output_fake(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    output: torch.Tensor,
-    save_kv_cache: bool,
-    layer_id: int,
-    *,
-    q_rope: Optional[torch.Tensor] = None,
-    k_rope: Optional[torch.Tensor] = None,
-    sinks: Optional[torch.Tensor] = None,
-) -> None:
-    return
-
-
-direct_register_custom_op(
-    op_name="unified_attention_with_output",
-    op_func=unified_attention_with_output,
-    mutates_args=["output"],
-    fake_impl=unified_attention_with_output_fake,
-)
+        logger.info("Using %s radix attention implementation.", impl_name)
+        return impl_cls(
+            num_heads=num_heads,
+            head_dim=head_dim,
+            scaling=scaling,
+            num_kv_heads=num_kv_heads,
+            layer_id=layer_id,
+            logit_cap=logit_cap,
+            v_head_dim=v_head_dim,
+            sliding_window_size=sliding_window_size,
+            is_cross_attention=is_cross_attention,
+            pos_encoding_mode=pos_encoding_mode,
+            logit_capping_method=logit_capping_method,
+            quant_config=quant_config,
+            attn_type=attn_type,
+            use_irope=use_irope,
+            prefix=prefix,
+        )
