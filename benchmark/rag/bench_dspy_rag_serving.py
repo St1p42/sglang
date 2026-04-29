@@ -409,6 +409,66 @@ def summarize_rounds(questions, outputs):
         }
     return round_summary
 
+def compute_answer_quality(outputs) -> Dict[str, float]:
+    """
+    Computes retrieval and generation quality metrics:
+    - ROUGE-L: longest common subsequence overlap, good for factual answers
+    - Token-level F1: precision/recall over token bags, standard for QA
+    - Recall@k: did any retrieved passage contain the answer string?
+    - MRR: mean reciprocal rank of the first passage containing the answer
+    """
+    from rouge_score import rouge_scorer as rs
+
+    successful = [o for o in outputs if o.success]
+    if not successful:
+        return {}
+
+    scorer = rs.RougeScorer(['rougeL'], use_stemmer=True)
+
+    rouge_l_scores, f1_scores, recall_hits, reciprocal_ranks = [], [], [], []
+
+    for o in successful:
+        pred = getattr(o, 'answer', '').strip().lower()
+        gt   = getattr(o, 'ground_truth', '').strip().lower()
+        passages = getattr(o, 'passages', [])
+
+        # ── ROUGE-L ──────────────────────────────────────────────────────
+        rouge_l_scores.append(scorer.score(gt, pred)['rougeL'].fmeasure)
+
+        # ── Token-level F1 ───────────────────────────────────────────────
+        pred_tokens = set(pred.split())
+        gt_tokens   = set(gt.split())
+        if pred_tokens and gt_tokens:
+            common    = pred_tokens & gt_tokens
+            precision = len(common) / len(pred_tokens)
+            recall    = len(common) / len(gt_tokens)
+            f1 = (2 * precision * recall / (precision + recall)
+                  if (precision + recall) > 0 else 0.0)
+        else:
+            f1 = 0.0
+        f1_scores.append(f1)
+
+        # ── Retrieval Recall@k ───────────────────────────────────────────
+        # Did any of the k retrieved passages contain the ground truth?
+        hit = any(gt in p.lower() for p in passages)
+        recall_hits.append(float(hit))
+
+        # ── MRR ──────────────────────────────────────────────────────────
+        # Reciprocal rank of first passage containing the answer
+        rr = 0.0
+        for rank, p in enumerate(passages, start=1):
+            if gt in p.lower():
+                rr = 1.0 / rank
+                break
+        reciprocal_ranks.append(rr)
+
+    return {
+        'rouge_l':          float(np.mean(rouge_l_scores)),
+        'token_f1':         float(np.mean(f1_scores)),
+        'retrieval_recall': float(np.mean(recall_hits)),
+        'mrr':              float(np.mean(reciprocal_ranks)),
+    }
+
 
 def print_metrics(metrics, cache_hit_rate, round_summary, extended_metrics=None, gpu_metrics=None, scaling_efficiency=0.0, answer_quality=None):
     print('\n{:=^60}'.format(' DSPy RAG Benchmark Result '))
@@ -442,8 +502,14 @@ def print_metrics(metrics, cache_hit_rate, round_summary, extended_metrics=None,
         print('{:<45} {:<10.4f}'.format('Scaling Efficiency', scaling_efficiency))
     if answer_quality is not None:
         print('{:-^60}'.format(' Answer Quality '))
-        print('{:<45} {:<10.6f}'.format('Exact Match', answer_quality.get('exact_match', 0.0)))
-        print('{:<45} {:<10.6f}'.format('Average F1', answer_quality.get('avg_f1', 0.0)))
+        for key, label in [
+            ('rouge_l',          'ROUGE-L'),
+            ('token_f1',         'Token F1'),
+            ('retrieval_recall', 'Retrieval Recall@k'),
+            ('mrr',              'MRR'),
+        ]:
+            if key in answer_quality:
+                print('{:<45} {:<10.4f}'.format(label, answer_quality[key]))
     print('=' * 60)
     if round_summary:
         print('Per-turn summary:')
@@ -540,10 +606,7 @@ def main():
     round_summary = summarize_rounds(questions, outputs)
     extended_metrics = compute_extended_metrics(outputs)
     scaling_efficiency = compute_scaling_efficiency(metrics.request_throughput, metrics.mean_e2e_latency_ms, args.parallel)
-    answer_quality = {
-        'exact_match': float(np.mean([getattr(o, 'answer_em', 0.0) for o in successful])) if successful else 0.0,
-        'avg_f1':      float(np.mean([getattr(o, 'answer_em', 0.0) for o in successful])) if successful else 0.0,
-    }
+    answer_quality = compute_answer_quality(outputs)
 
     print_metrics(
         metrics, cache_hit_rate, round_summary,
