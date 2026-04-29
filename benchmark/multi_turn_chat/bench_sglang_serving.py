@@ -4,7 +4,7 @@ import json
 import time
 from collections import defaultdict
 from dataclasses import asdict
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import aiohttp
 import numpy as np
@@ -19,6 +19,110 @@ from sglang.bench_serving import (
 )
 
 AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
+
+# ---------------------------------------------------------------------------
+# GPU utilization monitoring (gracefully skipped when NVML is unavailable)
+# ---------------------------------------------------------------------------
+
+_NVML_AVAILABLE = False
+try:
+    # nvidia-ml-py is the official NVIDIA-maintained package (pip install nvidia-ml-py).
+    # It exposes itself as "pynvml" at import time.  The older gpuopenanalytics/pynvml
+    # package is deprecated and should not be used.
+    import pynvml  # provided by nvidia-ml-py
+
+    _NVML_AVAILABLE = True
+except ImportError:
+    pass
+
+
+class GPUMonitor:
+    """Async background sampler for GPU utilization via NVML."""
+
+    def __init__(self, interval_s: float = 0.1, device_index: int = 0):
+        self.interval_s = interval_s
+        self.device_index = device_index
+        self.samples: List[float] = []
+        self._task: Optional[asyncio.Task] = None
+
+    async def _sample_loop(self) -> None:
+        pynvml.nvmlInit()
+        handle = pynvml.nvmlDeviceGetHandleByIndex(self.device_index)
+        try:
+            while True:
+                util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+                self.samples.append(float(util.gpu))
+                await asyncio.sleep(self.interval_s)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            pynvml.nvmlShutdown()
+
+    def start(self) -> None:
+        self._task = asyncio.create_task(self._sample_loop())
+
+    async def stop(self) -> None:
+        if self._task is not None:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+
+    def get_metrics(self) -> Dict[str, float]:
+        if not self.samples:
+            return {}
+        return {
+            "gpu_avg_utilization_pct": float(np.mean(self.samples)),
+            "gpu_max_utilization_pct": float(np.max(self.samples)),
+            "gpu_samples": len(self.samples),
+        }
+
+
+# ---------------------------------------------------------------------------
+# Extended metrics helpers
+# ---------------------------------------------------------------------------
+
+
+def compute_extended_metrics(outputs: List[RequestFuncOutput]) -> Dict[str, float]:
+    """Compute tail-latency and fairness metrics from raw request outputs."""
+    successful = [o for o in outputs if o.success]
+    if not successful:
+        return {}
+
+    extended: Dict[str, float] = {}
+
+    ttfts_ms = np.array([o.ttft for o in successful if o.ttft > 0]) * 1000
+    if len(ttfts_ms) > 0:
+        extended["p50_ttft_ms"] = float(np.percentile(ttfts_ms, 50))
+        extended["p95_ttft_ms"] = float(np.percentile(ttfts_ms, 95))
+        extended["p99_ttft_ms"] = float(np.percentile(ttfts_ms, 99))
+        extended["std_ttft_ms"] = float(np.std(ttfts_ms))
+        extended["max_ttft_ms"] = float(np.max(ttfts_ms))
+
+    lat_ms = np.array([o.latency for o in successful if o.latency > 0]) * 1000
+    if len(lat_ms) > 0:
+        extended["p50_e2e_latency_ms"] = float(np.percentile(lat_ms, 50))
+        extended["p95_e2e_latency_ms"] = float(np.percentile(lat_ms, 95))
+        extended["p99_e2e_latency_ms"] = float(np.percentile(lat_ms, 99))
+        extended["std_e2e_latency_ms"] = float(np.std(lat_ms))
+
+    return extended
+
+
+def compute_scaling_efficiency(
+    request_throughput: float,
+    mean_e2e_latency_ms: float,
+    parallel: int,
+) -> float:
+    """Estimate throughput scaling efficiency via Little's law.
+
+    efficiency = (throughput * mean_latency) / parallelism
+    A value of 1.0 means perfect linear scaling; <1.0 indicates contention.
+    """
+    if mean_e2e_latency_ms <= 0 or parallel <= 0:
+        return 0.0
+    return request_throughput * (mean_e2e_latency_ms / 1000.0) / parallel
 
 
 def parse_args():
@@ -189,6 +293,10 @@ async def run_all(args, multi_qas, tokenizer):
     url = f"http://{args.host}:{args.port}/generate"
     semaphore = asyncio.Semaphore(args.parallel)
 
+    gpu_monitor: Optional[GPUMonitor] = None
+    if _NVML_AVAILABLE:
+        gpu_monitor = GPUMonitor(interval_s=0.1)
+
     async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
         async def run_with_limit(conv_id, qas):
             async with semaphore:
@@ -205,9 +313,15 @@ async def run_all(args, multi_qas, tokenizer):
             asyncio.create_task(run_with_limit(i, item["qas"]))
             for i, item in enumerate(multi_qas)
         ]
+        if gpu_monitor is not None:
+            gpu_monitor.start()
         benchmark_start = time.perf_counter()
         results = await asyncio.gather(*tasks)
         duration = time.perf_counter() - benchmark_start
+        if gpu_monitor is not None:
+            await gpu_monitor.stop()
+
+    gpu_metrics = gpu_monitor.get_metrics() if gpu_monitor is not None else {}
 
     input_requests: List[DatasetRow] = []
     outputs: List[RequestFuncOutput] = []
@@ -219,7 +333,14 @@ async def run_all(args, multi_qas, tokenizer):
         cached_tokens_per_turn.extend(conv_cached_tokens)
         raw_round_metrics.extend(conv_round_metrics)
 
-    return input_requests, outputs, cached_tokens_per_turn, raw_round_metrics, duration
+    return (
+        input_requests,
+        outputs,
+        cached_tokens_per_turn,
+        raw_round_metrics,
+        duration,
+        gpu_metrics,
+    )
 
 
 def summarize_rounds(raw_round_metrics: List[Dict[str, float]]):
@@ -243,18 +364,66 @@ def summarize_rounds(raw_round_metrics: List[Dict[str, float]]):
     return round_summary
 
 
-def print_metrics(metrics, cache_hit_rate, round_summary):
-    print("\n{:=^50}".format(" Multi-turn Serving Benchmark Result "))
-    print("{:<40} {:<10.2f}".format("Request Throughput (req/s)", metrics.request_throughput))
-    print("{:<40} {:<10.2f}".format("Input Token Throughput (tok/s)", metrics.input_throughput))
-    print("{:<40} {:<10.2f}".format("Output Token Throughput (tok/s)", metrics.output_throughput))
-    print("{:<40} {:<10.2f}".format("Total Token Throughput (tok/s)", metrics.total_throughput))
-    print("{:<40} {:<10.2f}".format("Mean E2E Latency (ms)", metrics.mean_e2e_latency_ms))
-    print("{:<40} {:<10.2f}".format("Mean TTFT (ms)", metrics.mean_ttft_ms))
-    print("{:<40} {:<10.2f}".format("Mean TPOT (ms)", metrics.mean_tpot_ms))
-    print("{:<40} {:<10.2f}".format("Concurrency", metrics.concurrency))
-    print("{:<40} {:<10.6f}".format("Cache Hit Rate", cache_hit_rate))
-    print("=" * 50)
+def print_metrics(
+    metrics,
+    cache_hit_rate,
+    round_summary,
+    extended_metrics: Optional[Dict[str, float]] = None,
+    gpu_metrics: Optional[Dict[str, float]] = None,
+    scaling_efficiency: float = 0.0,
+):
+    print("\n{:=^60}".format(" Multi-turn Serving Benchmark Result "))
+
+    print("{:<45} {:<10.2f}".format("Request Throughput (req/s)", metrics.request_throughput))
+    print("{:<45} {:<10.2f}".format("Input Token Throughput (tok/s)", metrics.input_throughput))
+    print("{:<45} {:<10.2f}".format("Output Token Throughput (tok/s)", metrics.output_throughput))
+    print("{:<45} {:<10.2f}".format("Total Token Throughput (tok/s)", metrics.total_throughput))
+    print("{:<45} {:<10.2f}".format("Concurrency", metrics.concurrency))
+    print("{:<45} {:<10.6f}".format("Cache Hit Rate", cache_hit_rate))
+
+    print("{:-^60}".format(" Latency "))
+    print("{:<45} {:<10.2f}".format("Mean E2E Latency (ms)", metrics.mean_e2e_latency_ms))
+    print("{:<45} {:<10.2f}".format("Mean TTFT (ms)", metrics.mean_ttft_ms))
+    print("{:<45} {:<10.2f}".format("Mean TPOT (ms)", metrics.mean_tpot_ms))
+
+    if extended_metrics:
+        print("{:-^60}".format(" Tail Latency "))
+        for label, keys in [
+            ("TTFT", ("p50_ttft_ms", "p95_ttft_ms", "p99_ttft_ms")),
+            ("E2E Latency", ("p50_e2e_latency_ms", "p95_e2e_latency_ms", "p99_e2e_latency_ms")),
+        ]:
+            vals = [extended_metrics.get(k) for k in keys]
+            if all(v is not None for v in vals):
+                print(
+                    f"  {label:<20} p50={vals[0]:>10.2f}  "
+                    f"p95={vals[1]:>10.2f}  p99={vals[2]:>10.2f}"
+                )
+
+        print("{:-^60}".format(" Fairness "))
+        if "std_ttft_ms" in extended_metrics:
+            print("{:<45} {:<10.2f}".format("Std TTFT (ms)", extended_metrics["std_ttft_ms"]))
+        if "max_ttft_ms" in extended_metrics:
+            print("{:<45} {:<10.2f}".format("Max TTFT (ms)", extended_metrics["max_ttft_ms"]))
+        if "std_e2e_latency_ms" in extended_metrics:
+            print("{:<45} {:<10.2f}".format("Std E2E Latency (ms)", extended_metrics["std_e2e_latency_ms"]))
+
+    if gpu_metrics:
+        print("{:-^60}".format(" GPU Utilization "))
+        print("{:<45} {:<10.1f}".format(
+            "Avg GPU Utilization (%)", gpu_metrics["gpu_avg_utilization_pct"]
+        ))
+        print("{:<45} {:<10.1f}".format(
+            "Max GPU Utilization (%)", gpu_metrics["gpu_max_utilization_pct"]
+        ))
+        print("{:<45} {:<10d}".format(
+            "GPU Samples", int(gpu_metrics["gpu_samples"])
+        ))
+
+    if scaling_efficiency > 0:
+        print("{:-^60}".format(" Scaling "))
+        print("{:<45} {:<10.4f}".format("Scaling Efficiency", scaling_efficiency))
+
+    print("=" * 60)
 
     if round_summary:
         print("Per-turn summary:")
@@ -285,6 +454,7 @@ def main():
         cached_tokens_per_turn,
         raw_round_metrics,
         duration,
+        gpu_metrics,
     ) = asyncio.run(run_all(args, multi_qas, tokenizer))
 
     metrics, output_lens = calculate_metrics(
@@ -303,7 +473,19 @@ def main():
     )
     round_summary = summarize_rounds(raw_round_metrics)
 
-    print_metrics(metrics, cache_hit_rate, round_summary)
+    extended_metrics = compute_extended_metrics(outputs)
+    scaling_efficiency = compute_scaling_efficiency(
+        metrics.request_throughput, metrics.mean_e2e_latency_ms, args.parallel
+    )
+
+    print_metrics(
+        metrics,
+        cache_hit_rate,
+        round_summary,
+        extended_metrics=extended_metrics,
+        gpu_metrics=gpu_metrics,
+        scaling_efficiency=scaling_efficiency,
+    )
 
     result = {
         "task": "multi_turn_chat_serving",
@@ -315,6 +497,9 @@ def main():
         "duration": duration,
         "cache_hit_rate": cache_hit_rate,
         "metrics": asdict(metrics),
+        "extended_metrics": extended_metrics,
+        "gpu_metrics": gpu_metrics,
+        "scaling_efficiency": scaling_efficiency,
         "round_summary": round_summary,
         "details": {
             "input_lens": [request.prompt_len for request in input_requests],
