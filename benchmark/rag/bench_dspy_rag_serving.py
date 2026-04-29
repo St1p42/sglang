@@ -142,58 +142,52 @@ def compute_scaling_efficiency(request_throughput: float, mean_e2e_latency_ms: f
 
 class EmbeddingRetriever:
     """
-    Dense retriever backed by a sentence-transformers model.
-
-    On construction the entire corpus is encoded once and stored as a
-    normalised float32 matrix.  At query time a single forward pass encodes
-    the query and cosine similarities are computed with a dot product
-    (vectors are already L2-normalised).
-
-    Args:
-        corpus:      list of passage strings to index.
-        model_name:  any sentence-transformers checkpoint; defaults to a
-                     small, fast model that runs comfortably on CPU.
-        k:           number of passages to return per query.
-        device:      'cpu' | 'cuda' | 'mps' – passed straight to ST.
+    Dense retriever using HuggingFace transformers directly — 
+    no sentence-transformers dependency. Mean-pools the last hidden 
+    state and L2-normalises for cosine similarity.
     """
-
     def __init__(
         self,
         corpus: List[str],
         model_name: str = 'sentence-transformers/all-MiniLM-L6-v2',
         k: int = 4,
-        device: str = 'cuda',
+        device: str = 'cpu',
     ):
-        try:
-            from sentence_transformers import SentenceTransformer
-        except ImportError as exc:
-            raise ImportError(
-                'sentence-transformers is required for EmbeddingRetriever. '
-                'Install with: pip install sentence-transformers'
-            ) from exc
+        import torch
+        from transformers import AutoModel, AutoTokenizer as AT
 
         self.corpus = corpus
         self.k = k
-        self._model = SentenceTransformer(model_name, device=device)
+        self.device = device
+        self._torch = torch
+        self._tokenizer = AT.from_pretrained(model_name)
+        self._model = AutoModel.from_pretrained(model_name).to(device)
+        self._model.eval()
 
-        # Encode corpus once; shape (N, D), normalised for cosine similarity
-        self._corpus_embeddings: np.ndarray = self._model.encode(
-            corpus,
-            normalize_embeddings=True,
-            show_progress_bar=False,
-            convert_to_numpy=True,
+        # Encode corpus once at init
+        self._corpus_embeddings = self._encode(corpus)  # (N, D) numpy
+
+    def _encode(self, texts: List[str]) -> np.ndarray:
+        torch = self._torch
+        encoded = self._tokenizer(
+            texts,
+            padding=True,
+            truncation=True,
+            max_length=128,
+            return_tensors='pt',
         )
+        encoded = {k: v.to(self.device) for k, v in encoded.items()}
+        with torch.no_grad():
+            out = self._model(**encoded)
+        # Mean pool over token dimension
+        mask = encoded['attention_mask'].unsqueeze(-1).float()
+        emb = (out.last_hidden_state * mask).sum(1) / mask.sum(1)
+        emb = torch.nn.functional.normalize(emb, p=2, dim=1)
+        return emb.cpu().numpy()
 
     def __call__(self, query: str) -> List[str]:
-        query_emb = self._model.encode(
-            [query],
-            normalize_embeddings=True,
-            show_progress_bar=False,
-            convert_to_numpy=True,
-        )  # shape (1, D)
-
-        # Cosine sim = dot product because both sides are L2-normalised
-        scores = (self._corpus_embeddings @ query_emb.T).squeeze(axis=1)  # (N,)
+        query_emb = self._encode([query])  # (1, D)
+        scores = (self._corpus_embeddings @ query_emb.T).squeeze(axis=1)
         top_k_idx = np.argpartition(scores, -self.k)[-self.k:]
         top_k_idx = top_k_idx[np.argsort(scores[top_k_idx])[::-1]]
         return [self.corpus[i] for i in top_k_idx]
