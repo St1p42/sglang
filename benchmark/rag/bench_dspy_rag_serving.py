@@ -22,6 +22,10 @@ try:
 except Exception:
     _NVML_AVAILABLE = False
 
+# ---------------------------------------------------------------------------
+# GPU Monitor (unchanged)
+# ---------------------------------------------------------------------------
+
 class GPUMonitor:
     def __init__(self, interval_s: float = 0.1, device_index: int = 0):
         self.interval_s = interval_s
@@ -62,6 +66,10 @@ class GPUMonitor:
             'gpu_samples': len(self.samples),
         }
 
+# ---------------------------------------------------------------------------
+# Data / result containers (unchanged)
+# ---------------------------------------------------------------------------
+
 @dataclass
 class RequestFuncOutput:
     success: bool = False
@@ -94,6 +102,9 @@ class Metrics:
     mean_tpot_ms: float = 0.0
     concurrency: float = 0.0
 
+# ---------------------------------------------------------------------------
+# Helpers (unchanged)
+# ---------------------------------------------------------------------------
 
 def remove_prefix(text: str, prefix: str) -> str:
     return text[len(prefix):] if text.startswith(prefix) else text
@@ -125,69 +136,175 @@ def compute_scaling_efficiency(request_throughput: float, mean_e2e_latency_ms: f
         return 0.0
     return request_throughput * (mean_e2e_latency_ms / 1000.0) / parallel
 
-class LocalCorpusRetriever:
-    def __init__(self, corpus: List[str], k: int = 4):
+# ---------------------------------------------------------------------------
+# RAG: Embedding-based local retriever  ← REDESIGNED
+# ---------------------------------------------------------------------------
+
+class EmbeddingRetriever:
+    """
+    Dense retriever backed by a sentence-transformers model.
+
+    On construction the entire corpus is encoded once and stored as a
+    normalised float32 matrix.  At query time a single forward pass encodes
+    the query and cosine similarities are computed with a dot product
+    (vectors are already L2-normalised).
+
+    Args:
+        corpus:      list of passage strings to index.
+        model_name:  any sentence-transformers checkpoint; defaults to a
+                     small, fast model that runs comfortably on CPU.
+        k:           number of passages to return per query.
+        device:      'cpu' | 'cuda' | 'mps' – passed straight to ST.
+    """
+
+    def __init__(
+        self,
+        corpus: List[str],
+        model_name: str = 'sentence-transformers/all-MiniLM-L6-v2',
+        k: int = 4,
+        device: str = 'cuda',
+    ):
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ImportError as exc:
+            raise ImportError(
+                'sentence-transformers is required for EmbeddingRetriever. '
+                'Install with: pip install sentence-transformers'
+            ) from exc
+
         self.corpus = corpus
         self.k = k
+        self._model = SentenceTransformer(model_name, device=device)
+
+        # Encode corpus once; shape (N, D), normalised for cosine similarity
+        self._corpus_embeddings: np.ndarray = self._model.encode(
+            corpus,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+            convert_to_numpy=True,
+        )
 
     def __call__(self, query: str) -> List[str]:
-        q = set(query.lower().split())
-        scored = []
-        for doc in self.corpus:
-            d = set(doc.lower().split())
-            score = len(q & d)
-            scored.append((score, doc))
-        scored.sort(key=lambda x: (-x[0], len(x[1])))
-        return [d for s, d in scored[:self.k]]
+        query_emb = self._model.encode(
+            [query],
+            normalize_embeddings=True,
+            show_progress_bar=False,
+            convert_to_numpy=True,
+        )  # shape (1, D)
+
+        # Cosine sim = dot product because both sides are L2-normalised
+        scores = (self._corpus_embeddings @ query_emb.T).squeeze(axis=1)  # (N,)
+        top_k_idx = np.argpartition(scores, -self.k)[-self.k:]
+        top_k_idx = top_k_idx[np.argsort(scores[top_k_idx])[::-1]]
+        return [self.corpus[i] for i in top_k_idx]
+
+# ---------------------------------------------------------------------------
+# RAG: External retriever with embedding fallback  ← REDESIGNED
+# ---------------------------------------------------------------------------
 
 class ExternalRetriever:
-    def __init__(self, endpoint: str, timeout_s: int = 10, fallback=None):
+    """
+    Calls a teammate's retrieval service (POST /query → {passages: [...]}).
+    Falls back to a local EmbeddingRetriever if the endpoint is unreachable
+    or returns a non-200 response.
+
+    The fallback is any callable that accepts a query string and returns
+    List[str], so it can be an EmbeddingRetriever or anything else.
+    """
+
+    def __init__(
+        self,
+        endpoint: str,
+        timeout_s: int = 10,
+        fallback: Optional[callable] = None,
+    ):
         self.endpoint = endpoint
         self.timeout_s = timeout_s
         self.fallback = fallback
+
     def __call__(self, query: str) -> List[str]:
         try:
-            r = requests.post(self.endpoint, json={'query': query}, timeout=self.timeout_s)
+            r = requests.post(
+                self.endpoint,
+                json={'query': query},
+                timeout=self.timeout_s,
+            )
             r.raise_for_status()
             data = r.json()
+
+            # Accept several common response shapes
             if isinstance(data, dict):
-                for key in ['passages', 'documents', 'chunks', 'results']:
+                for key in ('passages', 'documents', 'chunks', 'results'):
                     if key in data and isinstance(data[key], list):
                         return [str(x) for x in data[key]]
             if isinstance(data, list):
                 return [str(x) for x in data]
-            raise ValueError('unexpected retriever response')
-        except Exception:
+
+            raise ValueError(f'Unexpected retriever response shape: {type(data)}')
+
+        except Exception as exc:
             if self.fallback is not None:
                 return self.fallback(query)
-            raise
+            raise RuntimeError(
+                f'External retriever failed and no fallback is configured: {exc}'
+            ) from exc
+
+# ---------------------------------------------------------------------------
+# RAG: DSPy module that wires retriever → generator  ← REDESIGNED
+# ---------------------------------------------------------------------------
 
 class DSPyRAG(dspy.Module):
-    def __init__(self, retriever, lm=None):
+    """
+    Proper RAG module:
+      1. Retrieve top-k passages for the question via `retriever`.
+      2. Pass context + question to a DSPy ChainOfThought generator.
+
+    The generator uses whatever LM is configured on the dspy.settings
+    context (set externally before calling forward).  Passing `lm`
+    explicitly is supported for testing.
+    """
+
+    def __init__(self, retriever: callable, lm=None):
         super().__init__()
         self.retriever = retriever
+        # ChainOfThought signature: context + question → answer
         self.generate = dspy.ChainOfThought('context, question -> answer')
-        self._lm = lm
-    def forward(self, question: str):
-        passages = self.retriever(question)
+        self._lm = lm  # reserved for explicit LM override if needed
+
+    def forward(self, question: str) -> dspy.Prediction:
+        passages: List[str] = self.retriever(question)
         context = '\n\n'.join(passages)
         pred = self.generate(context=context, question=question)
         return dspy.Prediction(answer=pred.answer, passages=passages)
 
+# ---------------------------------------------------------------------------
+# Arg parsing (unchanged)
+# ---------------------------------------------------------------------------
 
 def parse_args():
-    p = argparse.ArgumentParser(description='DSPy RAG benchmark with fallback retriever')
+    p = argparse.ArgumentParser(description='DSPy RAG benchmark with embedding retriever')
     p.add_argument('--host', type=str, default='127.0.0.1')
     p.add_argument('--port', type=int, default=30000)
     p.add_argument('--model', type=str, required=True)
     p.add_argument('--parallel', type=int, default=8)
     p.add_argument('--num-qa', type=int, default=64)
     p.add_argument('--num-questions', type=int, default=64)
-    p.add_argument('--retriever-endpoint', type=str, default='')
-    p.add_argument('--fallback-retriever', action='store_true')
+    p.add_argument('--retriever-endpoint', type=str, default='',
+                   help='URL of teammate retrieval service; falls back to local embedding retriever if empty or unreachable.')
+    p.add_argument('--embed-model', type=str, default='sentence-transformers/all-MiniLM-L6-v2',
+                   help='sentence-transformers checkpoint for local EmbeddingRetriever.')
+    p.add_argument('--embed-device', type=str, default='cuda',
+                   choices=['cpu', 'cuda', 'mps'],
+                   help='Device for sentence-transformers encoding.')
+    p.add_argument('--retriever-k', type=int, default=4,
+                   help='Number of passages to retrieve per query.')
     p.add_argument('--result-file', type=str, default='result_serving.jsonl')
     p.add_argument('--raw-result-file', type=str, default=None)
     return p.parse_args()
+
+# ---------------------------------------------------------------------------
+# Async request loop (unchanged)
+# ---------------------------------------------------------------------------
 
 async def async_request_sglang_generate(session, url, prompt, prompt_len, output_len):
     payload = {
@@ -244,6 +361,7 @@ async def async_request_sglang_generate(session, url, prompt, prompt_len, output
         output.error = str(e)
         return output, cached_tokens
 
+
 async def run_all(args, questions, rag, tokenizer, gt_answers):
     url = f'http://{args.host}:{args.port}/generate'
     sem = asyncio.Semaphore(args.parallel)
@@ -277,6 +395,10 @@ async def run_all(args, questions, rag, tokenizer, gt_answers):
     cached_tokens_per_turn = [r[2] for r in results]
     return input_requests, outputs, cached_tokens_per_turn, dur, gpu_metrics
 
+# ---------------------------------------------------------------------------
+# Metrics / printing (unchanged)
+# ---------------------------------------------------------------------------
+
 def summarize_rounds(questions, outputs):
     grouped = defaultdict(list)
     for i, out in enumerate(outputs):
@@ -293,6 +415,7 @@ def summarize_rounds(questions, outputs):
             'cache_hit_rate': 0.0 if prompt_sum == 0 else cached_sum / prompt_sum,
         }
     return round_summary
+
 
 def print_metrics(metrics, cache_hit_rate, round_summary, extended_metrics=None, gpu_metrics=None, scaling_efficiency=0.0, answer_quality=None):
     print('\n{:=^60}'.format(' DSPy RAG Benchmark Result '))
@@ -334,6 +457,9 @@ def print_metrics(metrics, cache_hit_rate, round_summary, extended_metrics=None,
         for turn_key, item in round_summary.items():
             print(f"  {turn_key}: requests={item['requests']}, mean_ttft_ms={item['mean_ttft_ms']:.2f}, mean_e2e_latency_ms={item['mean_e2e_latency_ms']:.2f}, cache_hit_rate={item['cache_hit_rate']:.6f}")
 
+# ---------------------------------------------------------------------------
+# Dataset (unchanged)
+# ---------------------------------------------------------------------------
 
 def make_dataset(n: int):
     base = [
@@ -353,24 +479,58 @@ def make_dataset(n: int):
         ans.append(a)
     return qs, ans
 
+# ---------------------------------------------------------------------------
+# Corpus (unchanged content, referenced by EmbeddingRetriever now)
+# ---------------------------------------------------------------------------
+
+LOCAL_CORPUS = [
+    'Paris is the capital of France.',
+    'William Shakespeare wrote Hamlet.',
+    'Jupiter is the largest planet in the solar system.',
+    'GPU means graphics processing unit.',
+    'Water boils at 100 C at sea level.',
+    'Albert Einstein developed the theory of relativity.',
+    'The currency of Japan is yen.',
+    'Portuguese is widely spoken in Brazil.',
+]
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 def main():
     args = parse_args()
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=False)
     questions, gt_answers = make_dataset(args.num_questions)
-    local = LocalCorpusRetriever([
-        'Paris is the capital of France.',
-        'William Shakespeare wrote Hamlet.',
-        'Jupiter is the largest planet in the solar system.',
-        'GPU means graphics processing unit.',
-        'Water boils at 100 C at sea level.',
-        'Albert Einstein developed the theory of relativity.',
-        'The currency of Japan is yen.',
-        'Portuguese is widely spoken in Brazil.'
-    ], k=4)
-    retriever = ExternalRetriever(args.retriever_endpoint, fallback=local) if args.retriever_endpoint else local
+
+    print(f'[retriever] Loading embedding model: {args.embed_model} on {args.embed_device}')
+    local_retriever = EmbeddingRetriever(
+        corpus=LOCAL_CORPUS,
+        model_name=args.embed_model,
+        k=args.retriever_k,
+        device=args.embed_device,
+    )
+
+    # Use external retriever if endpoint given, with local embedding fallback;
+    # otherwise use the local embedding retriever directly.
+    if args.retriever_endpoint:
+        print(f'[retriever] Using external endpoint: {args.retriever_endpoint} (fallback: local embedding)')
+        retriever = ExternalRetriever(
+            endpoint=args.retriever_endpoint,
+            timeout_s=10,
+            fallback=local_retriever,
+        )
+    else:
+        print('[retriever] No external endpoint — using local EmbeddingRetriever')
+        retriever = local_retriever
+
     rag = DSPyRAG(retriever=retriever)
-    input_requests, outputs, cached_tokens_per_turn, duration, gpu_metrics = asyncio.run(run_all(args, questions, rag, tokenizer, gt_answers))
+
+    input_requests, outputs, cached_tokens_per_turn, duration, gpu_metrics = asyncio.run(
+        run_all(args, questions, rag, tokenizer, gt_answers)
+    )
+
+    # ---- aggregate metrics (unchanged) ------------------------------------
     metrics = Metrics()
     successful = [o for o in outputs if o.success]
     metrics.request_throughput = len(successful) / duration if duration > 0 else 0.0
@@ -381,6 +541,7 @@ def main():
     metrics.mean_ttft_ms = float(np.mean([o.ttft for o in successful]) * 1000) if successful else 0.0
     metrics.mean_tpot_ms = float(np.mean([np.mean(o.itl) for o in successful if o.itl]) * 1000) if any(o.itl for o in successful) else 0.0
     metrics.concurrency = float(args.parallel)
+
     total_prompt_tokens = sum(o.prompt_len for o in successful if o.prompt_len > 0)
     cache_hit_rate = 0.0 if total_prompt_tokens == 0 else sum(cached_tokens_per_turn) / total_prompt_tokens
     round_summary = summarize_rounds(questions, outputs)
@@ -388,9 +549,17 @@ def main():
     scaling_efficiency = compute_scaling_efficiency(metrics.request_throughput, metrics.mean_e2e_latency_ms, args.parallel)
     answer_quality = {
         'exact_match': float(np.mean([getattr(o, 'answer_em', 0.0) for o in successful])) if successful else 0.0,
-        'avg_f1': float(np.mean([getattr(o, 'answer_em', 0.0) for o in successful])) if successful else 0.0,
+        'avg_f1':      float(np.mean([getattr(o, 'answer_em', 0.0) for o in successful])) if successful else 0.0,
     }
-    print_metrics(metrics, cache_hit_rate, round_summary, extended_metrics=extended_metrics, gpu_metrics=gpu_metrics, scaling_efficiency=scaling_efficiency, answer_quality=answer_quality)
+
+    print_metrics(
+        metrics, cache_hit_rate, round_summary,
+        extended_metrics=extended_metrics,
+        gpu_metrics=gpu_metrics,
+        scaling_efficiency=scaling_efficiency,
+        answer_quality=answer_quality,
+    )
+
     result = {
         'task': 'dspy_rag_serving',
         'host': args.host,
@@ -405,21 +574,30 @@ def main():
         'scaling_efficiency': scaling_efficiency,
         'round_summary': round_summary,
         'answer_quality': answer_quality,
+        'retriever': {
+            'type': 'external+embedding_fallback' if args.retriever_endpoint else 'embedding_local',
+            'embed_model': args.embed_model,
+            'embed_device': args.embed_device,
+            'k': args.retriever_k,
+            'endpoint': args.retriever_endpoint or None,
+        },
         'details': {
-            'input_lens': [request.prompt_len for request in input_requests],
-            'output_lens': [o.output_len for o in outputs],
-            'ttfts': [o.ttft for o in outputs],
-            'latencies': [o.latency for o in outputs],
-            'itls': [o.itl for o in outputs],
-            'cached_tokens': cached_tokens_per_turn,
-            'errors': [o.error for o in outputs],
+            'input_lens':     [request.prompt_len for request in input_requests],
+            'output_lens':    [o.output_len for o in outputs],
+            'ttfts':          [o.ttft for o in outputs],
+            'latencies':      [o.latency for o in outputs],
+            'itls':           [o.itl for o in outputs],
+            'cached_tokens':  cached_tokens_per_turn,
+            'errors':         [o.error for o in outputs],
         },
     }
+
     with open(args.result_file, 'a') as f:
         f.write(json.dumps(result) + '\n')
     if args.raw_result_file:
         with open(args.raw_result_file, 'w') as f:
             json.dump(result, f, indent=2)
+
 
 if __name__ == '__main__':
     main()
