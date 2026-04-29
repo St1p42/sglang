@@ -35,7 +35,15 @@ logger = logging.getLogger(__name__)
 class CustomHiRadixCache(RadixCache):
 
     def __init__(self, params: CacheInitParams, server_args: ServerArgs):
-        logger.warning("Using custom HiCache implementation.")
+        print(
+            ("*" * 2000)
+            + " ENTERED CUSTOM HICACHE IMPLEMENTATION "
+            + ("&" * 2000)
+        )
+        logger.warning(
+            "Confirmed active HiCache implementation: custom (%s).",
+            self.__class__.__name__,
+        )
         if server_args.hicache_io_backend == "direct":
             # FIXME: move this logic into server_args parsing
             if server_args.hicache_mem_layout == "page_first":
