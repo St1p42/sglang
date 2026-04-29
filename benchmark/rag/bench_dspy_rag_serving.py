@@ -281,7 +281,6 @@ def parse_args():
     p.add_argument('--port', type=int, default=30000)
     p.add_argument('--model', type=str, required=True)
     p.add_argument('--parallel', type=int, default=8)
-    p.add_argument('--num-qa', type=int, default=64)
     p.add_argument('--num-questions', type=int, default=64)
     p.add_argument('--retriever-endpoint', type=str, default='',
                    help='URL of teammate retrieval service; falls back to local embedding retriever if empty or unreachable.')
@@ -457,19 +456,19 @@ def print_metrics(metrics, cache_hit_rate, round_summary, extended_metrics=None,
 
 def make_dataset(n: int):
     base = [
-        ('What is the capital of France?', 'Paris'),
-        ('Who wrote Hamlet?', 'William Shakespeare'),
-        ('What is the largest planet?', 'Jupiter'),
-        ('What does GPU stand for?', 'graphics processing unit'),
-        ('What is the boiling point of water in Celsius?', '100 C'),
-        ('Who developed the theory of relativity?', 'Albert Einstein'),
-        ('What is the currency of Japan?', 'yen'),
-        ('What is the main language spoken in Brazil?', 'Portuguese'),
+        ("Where does Khoa study and when does he graduate?", "UMass Amherst, May 2027"),
+        ("What did Khoa build at FPT Software?", "RAG and GraphRAG systems"),
+        ("What lab did Khoa do undergraduate research in?", "PLASMA Lab"),
+        ("What NeurIPS 2024 paper is Khoa reimplementing, and what part is he reimplementing?", "SGLang, RadixAttention and cache-aware scheduling"),
+        ("What performance gains did Khoa achieve on his KV cache project?", "38% latency reduction, 61% throughput gain"),
+        ("What does Khoa's agentic search pipeline use?", "React, Claude API, parallel scraping"),
+        ("What is Khoa's independent study about?", "benchmarking deep research LLM agents"),
+        ("How many records did Khoa process in his QA pipeline?", "100k+"),
     ]
     qs, ans = [], []
     for i in range(n):
         q, a = base[i % len(base)]
-        qs.append(q + f' (variant {i})')
+        qs.append(q)
         ans.append(a)
     return qs, ans
 
@@ -478,14 +477,14 @@ def make_dataset(n: int):
 # ---------------------------------------------------------------------------
 
 LOCAL_CORPUS = [
-    'Paris is the capital of France.',
-    'William Shakespeare wrote Hamlet.',
-    'Jupiter is the largest planet in the solar system.',
-    'GPU means graphics processing unit.',
-    'Water boils at 100 C at sea level.',
-    'Albert Einstein developed the theory of relativity.',
-    'The currency of Japan is yen.',
-    'Portuguese is widely spoken in Brazil.',
+    'Khoa is a first-year MS CS student at UMass Amherst expected to graduate in May 2027.',
+    'Khoa interned as an ML Engineer at FPT Software building RAG and GraphRAG systems.',
+    'Khoa worked at PLASMA Lab profiling inference latency on edge hardware.',
+    'Khoa is reimplementing RadixAttention and cache-aware scheduling from SGLang NeurIPS 2024.',
+    'Khoa achieved 38% latency reduction and 61% throughput gain on L4 GPUs with his KV cache project.',
+    'Khoa built a multi-stage agentic search pipeline using React, Claude API, and parallel scraping.',
+    'Khoa is benchmarking deep research LLM agents with GPU-accelerated evaluation as an independent study.',
+    'Khoa processed 100k+ records in his multi-document QA pipeline with 70-85% speedup via LRU caching.',
 ]
 
 # ---------------------------------------------------------------------------
