@@ -12,9 +12,7 @@ from __future__ import annotations
 
 import logging
 from typing import List
-
 import torch
-
 from sglang.srt.managers.schedule_batch import Req
 from sglang.srt.mem_cache.base_prefix_cache import BasePrefixCache
 from sglang.srt.mem_cache.radix_cache import RadixKey
