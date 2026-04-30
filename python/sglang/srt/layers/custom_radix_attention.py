@@ -26,7 +26,7 @@ import torch
 from torch import nn
 
 from sglang.srt.compilation.piecewise_context_manager import get_forward_context
-from sglang.srt.utils.custom_op import register_custom_op
+from sglang.srt.utils import direct_register_custom_op
 
 if TYPE_CHECKING:
     from sglang.srt.layers.quantization.base_config import QuantizationConfig
@@ -193,7 +193,6 @@ class RadixAttention(nn.Module):
         )
 
 
-@register_custom_op(mutates_args=["output"])
 def unified_attention_with_output(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -239,3 +238,26 @@ def unified_attention_with_output(
         f"Output tensor element mismatch: {output.numel()} != {ret.numel()}"
     )
     output.view(ret.shape).copy_(ret)
+
+
+def unified_attention_with_output_fake(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    output: torch.Tensor,
+    save_kv_cache: bool,
+    layer_id: int,
+    *,
+    q_rope: Optional[torch.Tensor] = None,
+    k_rope: Optional[torch.Tensor] = None,
+    sinks: Optional[torch.Tensor] = None,
+) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="unified_attention_with_output",
+    op_func=unified_attention_with_output,
+    mutates_args=["output"],
+    fake_impl=unified_attention_with_output_fake,
+)
