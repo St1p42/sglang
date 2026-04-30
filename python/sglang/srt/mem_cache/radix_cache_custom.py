@@ -10,6 +10,7 @@ import torch
 from sglang.srt.mem_cache.base_prefix_cache import BasePrefixCache, MatchResult
 from sglang.srt.mem_cache.cache_init_params import CacheInitParams
 from sglang.srt.mem_cache.radix_cache_vanilla import RadixKey
+from sglang.srt.mem_cache.utils import convert_to_bigram_key
 
 
 logger = logging.getLogger(__name__)
@@ -195,6 +196,7 @@ class CustomRadixCacheImpl(BasePrefixCache):
         self.req_to_token_pool = params.req_to_token_pool
         self.token_to_kv_pool_allocator = params.token_to_kv_pool_allocator
         self.page_size = params.page_size
+        self.is_eagle = params.is_eagle
         self.enable_kv_cache_events = params.enable_kv_cache_events
 
         if self.page_size != 1:
@@ -224,6 +226,15 @@ class CustomRadixCacheImpl(BasePrefixCache):
             last_device_node=self.root_node,
             last_host_node=self.root_node,
         )
+
+    def maybe_bigram_convert(
+        self, key: RadixKey, value: Optional[torch.Tensor] = None
+    ) -> tuple[RadixKey, Optional[torch.Tensor]]:
+        if self.is_eagle and not key.is_bigram:
+            key.token_ids = convert_to_bigram_key(key.token_ids)
+            if value is not None:
+                value = value[: len(key)]
+        return key, value
 
     def _next_access_ts(self) -> int:
         self._access_clock += 1
