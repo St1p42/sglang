@@ -11,7 +11,10 @@ python -m sglang.launch_server --model-path Qwen/Qwen2.5-14B-Instruct --port 300
 python -m sglang.launch_server --model-path Qwen/Qwen2.5-14B-Instruct --port 30000
 
 # SGLang server with hierarchical radix cache enabled
-python -m sglang.launch_server --model-path Qwen/Qwen2.5-14B-Instruct --port 30000 --enable-hierarchical-cache
+python -m sglang.launch_server --model-path Qwen/Qwen2.5-14B-Instruct --port 30000 \
+  --enable-hierarchical-cache \
+  --hicache-impl custom \
+  --hicache-backup-policy fixed
 
 ```
 
