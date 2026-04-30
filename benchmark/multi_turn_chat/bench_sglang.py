@@ -15,9 +15,13 @@ from sglang.utils import dump_state_text
 
 @sgl.function
 def multi_turns(s, qas):
-    for qa in qas:
+    for turn_idx, qa in enumerate(qas):
         s += qa["prompt"]
-        s += sgl.gen(max_tokens=qa["new_tokens"], ignore_eos=True)
+        s += sgl.gen(
+            name=f"answer_{turn_idx}",
+            max_tokens=qa["new_tokens"],
+            ignore_eos=True,
+        )
 
 
 def main(args):
@@ -39,6 +43,59 @@ def main(args):
 
     print(f"Latency: {latency:.3f}")
 
+    turn_records = []
+    turn_summary = {}
+    for turn_idx in range(args.turns):
+        turn_key = f"answer_{turn_idx}"
+        turn_items = []
+        for state_idx, state in enumerate(states):
+            meta_info = state.get_meta_info(turn_key)
+            if not meta_info:
+                continue
+
+            prompt_tokens = meta_info.get("prompt_tokens", 0)
+            cached_tokens = meta_info.get("cached_tokens", 0)
+            cache_hit_rate = (
+                0.0 if prompt_tokens == 0 else cached_tokens / prompt_tokens
+            )
+            record = {
+                "state_idx": state_idx,
+                "turn": turn_idx,
+                "prompt_tokens": prompt_tokens,
+                "cached_tokens": cached_tokens,
+                "cache_hit_rate": cache_hit_rate,
+                "completion_tokens": meta_info.get("completion_tokens", 0),
+                "e2e_latency": meta_info.get("e2e_latency"),
+            }
+            turn_records.append(record)
+            turn_items.append(record)
+            print(
+                "[TURN CACHE] "
+                f"turn={turn_idx} state={state_idx} "
+                f"prompt_tokens={prompt_tokens} cached_tokens={cached_tokens} "
+                f"cache_hit_rate={cache_hit_rate:.6f}"
+            )
+
+        if turn_items:
+            prompt_sum = sum(item["prompt_tokens"] for item in turn_items)
+            cached_sum = sum(item["cached_tokens"] for item in turn_items)
+            turn_summary[f"turn_{turn_idx}"] = {
+                "requests": len(turn_items),
+                "prompt_tokens": prompt_sum,
+                "cached_tokens": cached_sum,
+                "cache_hit_rate": 0.0 if prompt_sum == 0 else cached_sum / prompt_sum,
+            }
+
+    if turn_summary:
+        print("Per-turn cache summary:")
+        for turn_key, item in turn_summary.items():
+            print(
+                f"  {turn_key}: requests={item['requests']}, "
+                f"prompt_tokens={item['prompt_tokens']}, "
+                f"cached_tokens={item['cached_tokens']}, "
+                f"cache_hit_rate={item['cache_hit_rate']:.6f}"
+            )
+
     dump_state_text(f"tmp_output_{args.backend}.txt", states)
 
     with open(args.result_file, "a") as fout:
@@ -53,6 +110,8 @@ def main(args):
                 "parallel": args.parallel,
                 "output_mode": "long" if args.long else "short",
             },
+            "turn_summary": turn_summary,
+            "turn_records": turn_records,
         }
         fout.write(json.dumps(value) + "\n")
 
