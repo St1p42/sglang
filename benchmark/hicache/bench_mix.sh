@@ -11,6 +11,8 @@ nohup python3 -m sglang.launch_server \
     --enable-metrics --enable-cache-report \
     --page-size 64 \
     --enable-hierarchical-cache \
+    --hicache-impl custom \
+    --hicache-backup-policy fixed \
     --hicache-ratio 2.5 --hicache-size 0 \
     --hicache-io-backend kernel \
     --hicache-mem-layout layer_first \
