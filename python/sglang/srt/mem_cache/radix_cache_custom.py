@@ -364,8 +364,9 @@ class CustomRadixCacheImpl(BasePrefixCache):
         request suffix against each child node's compressed `token_segment`,
         then:
         - consume a full segment when it matches fully
-        - stop when the next segment only partially matches
-        - return the deepest fully matched cached node
+        - if the next segment only partially matches, split once to expose that
+          boundary as a reusable cached node
+        - return the deepest matched cached node
 
         Because nodes store only local KV spans, the reusable KV result is
         normally assembled by concatenating the `kv_indices` from each matched
@@ -393,6 +394,13 @@ class CustomRadixCacheImpl(BasePrefixCache):
 
             prefix_len = self._lcp_len(child.token_segment, remaining)
             if prefix_len < len(child.token_segment):
+                if prefix_len > 0:
+                    # Expose the partial-match boundary as a real radix node so
+                    # later lookups and schedulers can reuse the longest cached
+                    # prefix instead of falling back to the previous ancestor.
+                    split_node = self._split_child(node, child, prefix_len)
+                    path.append(split_node)
+                    node = split_node
                 break
 
             path.append(child)
