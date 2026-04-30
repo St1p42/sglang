@@ -39,7 +39,7 @@ class CustomHiRadixCache(RadixCache):
     """
 
     def __init__(self, params: CacheInitParams, server_args: ServerArgs):
-        self._validate_custom_config(server_args)
+        self._validate_custom_config(params, server_args)
         print(
             ("*" * 2000)
             + " ENTERED CUSTOM HICACHE IMPLEMENTATION "
@@ -110,7 +110,13 @@ class CustomHiRadixCache(RadixCache):
 
         super().__init__(params=params)
 
-    def _validate_custom_config(self, server_args: ServerArgs) -> None:
+    def _validate_custom_config(
+        self, params: CacheInitParams, server_args: ServerArgs
+    ) -> None:
+        if params.is_eagle:
+            raise ValueError(
+                "CustomHiRadixCache does not support EAGLE / bigram radix keys."
+            )
         if server_args.hicache_storage_backend is not None:
             raise ValueError(
                 "CustomHiRadixCache is CPU+GPU-only and does not support "
@@ -148,9 +154,8 @@ class CustomHiRadixCache(RadixCache):
         kv_indices: torch.Tensor,
         extra_key,
     ) -> tuple[RadixKey, torch.Tensor]:
-        radix_key = RadixKey(token_ids, extra_key, is_bigram=self.is_eagle)
-        radix_key, values = self.maybe_bigram_convert(radix_key, kv_indices)
-        assert values is not None
+        radix_key = RadixKey(token_ids, extra_key, is_bigram=False)
+        values = kv_indices
         aligned_len = self._page_align_len(len(radix_key))
         if aligned_len != len(radix_key):
             radix_key = RadixKey(
@@ -541,7 +546,6 @@ class CustomHiRadixCache(RadixCache):
 
     def match_prefix(self, key: RadixKey, **kwargs):
         empty_indices = torch.empty((0,), dtype=torch.int64, device=self.device)
-        key, _ = self.maybe_bigram_convert(key)
         if self.disable or len(key) == 0:
             return MatchResult(
                 device_indices=empty_indices,
@@ -631,12 +635,8 @@ class CustomHiRadixCache(RadixCache):
         priority: int | None = None,
     ):
         priority = 0 if priority is None else priority
-        key, value = self.maybe_bigram_convert(key, value)
         if len(key) == 0:
             return 0
-
-        if self.is_eagle and value is not None:
-            value = value[: len(key)]
 
         cursor = self.root_node
         branch_key = self.get_child_key_fn(key)
