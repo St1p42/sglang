@@ -92,6 +92,14 @@ class DatasetRow:
     output_len: int
 
 @dataclass
+class WorkloadRow:
+    request_id: str
+    group_id: str
+    variant_id: int
+    prompt: str
+    answer: str
+
+@dataclass
 class Metrics:
     request_throughput: float = 0.0
     input_throughput: float = 0.0
@@ -281,7 +289,13 @@ def parse_args():
     p.add_argument('--port', type=int, default=30000)
     p.add_argument('--model', type=str, required=True)
     p.add_argument('--parallel', type=int, default=8)
-    p.add_argument('--num-questions', type=int, default=64)
+    p.add_argument('--num-questions', type=int, default=64,
+                   help='Number of synthetic questions to use when --dataset-file is not provided.')
+    p.add_argument('--dataset-file', type=str, default='',
+                   help='Optional JSONL workload file with fields: request_id, group_id, variant_id, prompt, answer. '
+                        'Rows are read in file order and submitted in that order.')
+    p.add_argument('--max-requests', type=int, default=None,
+                   help='Optional limit on rows read from --dataset-file. By default, all rows are used.')
     p.add_argument('--retriever-endpoint', type=str, default='',
                    help='URL of teammate retrieval service; falls back to local embedding retriever if empty or unreachable.')
     p.add_argument('--embed-model', type=str, default='sentence-transformers/all-MiniLM-L6-v2',
@@ -294,6 +308,57 @@ def parse_args():
     p.add_argument('--result-file', type=str, default='result_serving.jsonl')
     p.add_argument('--raw-result-file', type=str, default=None)
     return p.parse_args()
+
+
+def load_workload_jsonl(path: str, max_requests: Optional[int] = None) -> List[WorkloadRow]:
+    """
+    Load the slim JSONL workload in file order.
+
+    Expected schema per line:
+      {
+        "request_id": "doc_00000_q00",
+        "group_id": "doc_00000",
+        "variant_id": 0,
+        "prompt": "Context:\\n...\\n\\nQuestion: ...\\nAnswer:",
+        "answer": "..."
+      }
+
+    The order of rows in the returned list is exactly the order of lines in the file.
+    """
+    rows: List[WorkloadRow] = []
+
+    with open(path, 'r', encoding='utf-8') as f:
+        for line_no, line in enumerate(f, start=1):
+            line = line.strip()
+            if not line:
+                continue
+
+            obj = json.loads(line)
+            missing = [k for k in ('prompt', 'answer') if k not in obj]
+            if missing:
+                raise ValueError(f'{path}:{line_no} missing required field(s): {missing}')
+
+            # request_id/group_id/variant_id are useful metadata, but default safely
+            # so older files with only prompt/answer still run.
+            request_id = str(obj.get('request_id', f'req_{len(rows):06d}'))
+            group_id = str(obj.get('group_id', 'unknown_group'))
+            variant_id = int(obj.get('variant_id', -1))
+
+            rows.append(WorkloadRow(
+                request_id=request_id,
+                group_id=group_id,
+                variant_id=variant_id,
+                prompt=str(obj['prompt']),
+                answer=str(obj['answer']),
+            ))
+
+            if max_requests is not None and len(rows) >= max_requests:
+                break
+
+    if not rows:
+        raise ValueError(f'No workload rows loaded from {path}')
+
+    return rows
 
 # ---------------------------------------------------------------------------
 # Async request loop (unchanged)
@@ -355,11 +420,12 @@ async def async_request_sglang_generate(session, url, prompt, prompt_len, output
         return output, cached_tokens
 
 
-async def run_all(args, questions, rag, tokenizer, gt_answers):
+async def run_all(args, questions, rag, tokenizer, gt_answers, workload_rows: Optional[List[WorkloadRow]] = None):
     url = f'http://{args.host}:{args.port}/generate'
     sem = asyncio.Semaphore(args.parallel)
+
     async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
-        async def one(q, gt):
+        async def one_synthetic(i: int, q: str, gt: str):
             async with sem:
                 passages = rag.retriever(q)
                 prompt = f'Context:\n{chr(10).join(passages)}\n\nQuestion: {q}\nAnswer:'
@@ -369,9 +435,40 @@ async def run_all(args, questions, rag, tokenizer, gt_answers):
                 out.ground_truth = gt
                 out.passages = passages
                 out.cached_tokens = cached
+                out.request_id = f'synthetic_{i:06d}'
+                out.group_id = None
+                out.variant_id = None
                 out.answer_em = float(answer_exact_match(dspy.Example(answer=gt), dspy.Prediction(answer=out.answer)))
-                return out, prompt_len, cached
-        tasks = [asyncio.create_task(one(q, gt)) for q, gt in zip(questions, gt_answers)]
+                return out, prompt_len, cached, prompt
+
+        async def one_workload(i: int, row: WorkloadRow):
+            async with sem:
+                prompt = row.prompt
+                prompt_len = len(tokenizer(prompt).input_ids)
+                out, cached = await async_request_sglang_generate(session, url, prompt, prompt_len, 32)
+                out.answer = out.generated_text.strip()
+                out.ground_truth = row.answer
+                out.passages = []  # No retriever is used for prebuilt JSONL prompts.
+                out.cached_tokens = cached
+                out.request_id = row.request_id
+                out.group_id = row.group_id
+                out.variant_id = row.variant_id
+                out.answer_em = float(answer_exact_match(dspy.Example(answer=row.answer), dspy.Prediction(answer=out.answer)))
+                return out, prompt_len, cached, prompt
+
+        if workload_rows is not None:
+            # Preserve JSONL order when creating tasks. Concurrency is still controlled
+            # by the semaphore; SGLang performs its own dynamic scheduling server-side.
+            tasks = [
+                asyncio.create_task(one_workload(i, row))
+                for i, row in enumerate(workload_rows)
+            ]
+        else:
+            tasks = [
+                asyncio.create_task(one_synthetic(i, q, gt))
+                for i, (q, gt) in enumerate(zip(questions, gt_answers))
+            ]
+
         gpu_monitor = GPUMonitor() if _NVML_AVAILABLE else None
         if gpu_monitor is not None:
             gpu_monitor.start()
@@ -383,8 +480,9 @@ async def run_all(args, questions, rag, tokenizer, gt_answers):
             gpu_metrics = gpu_monitor.get_metrics()
         else:
             gpu_metrics = {}
+
     outputs = [r[0] for r in results]
-    input_requests = [DatasetRow(prompt=q, prompt_len=r[1], output_len=32) for q, r in zip(questions, results)]
+    input_requests = [DatasetRow(prompt=r[3], prompt_len=r[1], output_len=32) for r in results]
     cached_tokens_per_turn = [r[2] for r in results]
     return input_requests, outputs, cached_tokens_per_turn, dur, gpu_metrics
 
@@ -411,11 +509,12 @@ def summarize_rounds(questions, outputs):
 
 def compute_answer_quality(outputs) -> Dict[str, float]:
     """
-    Computes retrieval and generation quality metrics:
-    - ROUGE-L: longest common subsequence overlap, good for factual answers
-    - Token-level F1: precision/recall over token bags, standard for QA
-    - Recall@k: did any retrieved passage contain the answer string?
-    - MRR: mean reciprocal rank of the first passage containing the answer
+    Computes generation quality metrics and, when passages are available,
+    retrieval quality metrics.
+
+    For JSONL workload mode, prompts are prebuilt and no retriever is called,
+    so passages are empty and retrieval_recall / mrr are omitted instead of
+    being reported as misleading zeros.
     """
     from rouge_score import rouge_scorer as rs
 
@@ -429,46 +528,48 @@ def compute_answer_quality(outputs) -> Dict[str, float]:
 
     for o in successful:
         pred = getattr(o, 'answer', '').strip().lower()
-        gt   = getattr(o, 'ground_truth', '').strip().lower()
-        passages = getattr(o, 'passages', [])
+        gt = getattr(o, 'ground_truth', '').strip().lower()
+        passages = getattr(o, 'passages', []) or []
 
         # ── ROUGE-L ──────────────────────────────────────────────────────
         rouge_l_scores.append(scorer.score(gt, pred)['rougeL'].fmeasure)
 
         # ── Token-level F1 ───────────────────────────────────────────────
         pred_tokens = set(pred.split())
-        gt_tokens   = set(gt.split())
+        gt_tokens = set(gt.split())
         if pred_tokens and gt_tokens:
-            common    = pred_tokens & gt_tokens
+            common = pred_tokens & gt_tokens
             precision = len(common) / len(pred_tokens)
-            recall    = len(common) / len(gt_tokens)
+            recall = len(common) / len(gt_tokens)
             f1 = (2 * precision * recall / (precision + recall)
                   if (precision + recall) > 0 else 0.0)
         else:
             f1 = 0.0
         f1_scores.append(f1)
 
-        # ── Retrieval Recall@k ───────────────────────────────────────────
-        # Did any of the k retrieved passages contain the ground truth?
-        hit = any(gt in p.lower() for p in passages)
-        recall_hits.append(float(hit))
+        # ── Retrieval metrics only when passages exist ───────────────────
+        if passages:
+            hit = any(gt in p.lower() for p in passages)
+            recall_hits.append(float(hit))
 
-        # ── MRR ──────────────────────────────────────────────────────────
-        # Reciprocal rank of first passage containing the answer
-        rr = 0.0
-        for rank, p in enumerate(passages, start=1):
-            if gt in p.lower():
-                rr = 1.0 / rank
-                break
-        reciprocal_ranks.append(rr)
+            rr = 0.0
+            for rank, p in enumerate(passages, start=1):
+                if gt in p.lower():
+                    rr = 1.0 / rank
+                    break
+            reciprocal_ranks.append(rr)
 
-    return {
-        'rouge_l':          float(np.mean(rouge_l_scores)),
-        'token_f1':         float(np.mean(f1_scores)),
-        'retrieval_recall': float(np.mean(recall_hits)),
-        'mrr':              float(np.mean(reciprocal_ranks)),
+    result = {
+        'rouge_l': float(np.mean(rouge_l_scores)),
+        'token_f1': float(np.mean(f1_scores)),
     }
 
+    if recall_hits:
+        result['retrieval_recall'] = float(np.mean(recall_hits))
+    if reciprocal_ranks:
+        result['mrr'] = float(np.mean(reciprocal_ranks))
+
+    return result
 
 def print_metrics(metrics, cache_hit_rate, round_summary, extended_metrics=None, gpu_metrics=None, scaling_efficiency=0.0, answer_quality=None):
     print('\n{:=^60}'.format(' DSPy RAG Benchmark Result '))
@@ -646,33 +747,56 @@ LOCAL_CORPUS = [
 def main():
     args = parse_args()
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=False)
-    questions, gt_answers = make_dataset(args.num_questions)
 
-    print(f'[retriever] Loading embedding model: {args.embed_model} on {args.embed_device}')
-    local_retriever = EmbeddingRetriever(
-        corpus=LOCAL_CORPUS,
-        model_name=args.embed_model,
-        k=args.retriever_k,
-        device=args.embed_device,
-    )
+    workload_rows: Optional[List[WorkloadRow]] = None
 
-    # Use external retriever if endpoint given, with local embedding fallback;
-    # otherwise use the local embedding retriever directly.
-    if args.retriever_endpoint:
-        print(f'[retriever] Using external endpoint: {args.retriever_endpoint} (fallback: local embedding)')
-        retriever = ExternalRetriever(
-            endpoint=args.retriever_endpoint,
-            timeout_s=10,
-            fallback=local_retriever,
-        )
+    if args.dataset_file:
+        workload_rows = load_workload_jsonl(args.dataset_file, max_requests=args.max_requests)
+        questions = [row.request_id for row in workload_rows]  # used only for summaries/alignment
+        gt_answers = [row.answer for row in workload_rows]
+        rag = None
+        retriever_info = {
+            'type': 'prebuilt_jsonl_prompts',
+            'dataset_file': args.dataset_file,
+            'max_requests': args.max_requests,
+        }
+        print(f'[dataset] Loaded {len(workload_rows)} prebuilt prompts from {args.dataset_file}')
+        print('[dataset] JSONL row order is preserved when creating async tasks.')
     else:
-        print('[retriever] No external endpoint — using local EmbeddingRetriever')
-        retriever = local_retriever
+        questions, gt_answers = make_dataset(args.num_questions)
 
-    rag = DSPyRAG(retriever=retriever)
+        print(f'[retriever] Loading embedding model: {args.embed_model} on {args.embed_device}')
+        local_retriever = EmbeddingRetriever(
+            corpus=LOCAL_CORPUS,
+            model_name=args.embed_model,
+            k=args.retriever_k,
+            device=args.embed_device,
+        )
+
+        # Use external retriever if endpoint given, with local embedding fallback;
+        # otherwise use the local embedding retriever directly.
+        if args.retriever_endpoint:
+            print(f'[retriever] Using external endpoint: {args.retriever_endpoint} (fallback: local embedding)')
+            retriever = ExternalRetriever(
+                endpoint=args.retriever_endpoint,
+                timeout_s=10,
+                fallback=local_retriever,
+            )
+        else:
+            print('[retriever] No external endpoint — using local EmbeddingRetriever')
+            retriever = local_retriever
+
+        rag = DSPyRAG(retriever=retriever)
+        retriever_info = {
+            'type': 'external+embedding_fallback' if args.retriever_endpoint else 'embedding_local',
+            'embed_model': args.embed_model,
+            'embed_device': args.embed_device,
+            'k': args.retriever_k,
+            'endpoint': args.retriever_endpoint or None,
+        }
 
     input_requests, outputs, cached_tokens_per_turn, duration, gpu_metrics = asyncio.run(
-        run_all(args, questions, rag, tokenizer, gt_answers)
+        run_all(args, questions, rag, tokenizer, gt_answers, workload_rows=workload_rows)
     )
 
     # ---- aggregate metrics (unchanged) ------------------------------------
@@ -706,7 +830,7 @@ def main():
         'task': 'dspy_rag_serving',
         'host': args.host,
         'port': args.port,
-        'num_requests': args.num_questions,
+        'num_requests': len(input_requests),
         'parallel': args.parallel,
         'duration': duration,
         'cache_hit_rate': cache_hit_rate,
@@ -716,13 +840,7 @@ def main():
         'scaling_efficiency': scaling_efficiency,
         'round_summary': round_summary,
         'answer_quality': answer_quality,
-        'retriever': {
-            'type': 'external+embedding_fallback' if args.retriever_endpoint else 'embedding_local',
-            'embed_model': args.embed_model,
-            'embed_device': args.embed_device,
-            'k': args.retriever_k,
-            'endpoint': args.retriever_endpoint or None,
-        },
+        'retriever': retriever_info,
         'details': {
             'input_lens':     [request.prompt_len for request in input_requests],
             'output_lens':    [o.output_len for o in outputs],
@@ -731,6 +849,9 @@ def main():
             'itls':           [o.itl for o in outputs],
             'cached_tokens':  cached_tokens_per_turn,
             'errors':         [o.error for o in outputs],
+            'request_ids':    [getattr(o, 'request_id', None) for o in outputs],
+            'group_ids':      [getattr(o, 'group_id', None) for o in outputs],
+            'variant_ids':    [getattr(o, 'variant_id', None) for o in outputs],
         },
     }
 
