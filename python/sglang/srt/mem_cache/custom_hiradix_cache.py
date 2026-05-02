@@ -682,7 +682,6 @@ class CustomHiRadixCache(RadixCache):
 
     def match_prefix(self, key: RadixKey, **kwargs):
         empty_value = torch.empty((0,), dtype=torch.int64, device=self.device)
-        key, _ = self.maybe_bigram_convert(key)
         if self.disable or len(key) == 0:
             return MatchResult(
                 device_indices=empty_value,
@@ -854,14 +853,9 @@ class CustomHiRadixCache(RadixCache):
     ):
         if priority is None:
             priority = 0
-        key, value = self.maybe_bigram_convert(key, value)
 
         if len(key) == 0:
             return 0
-
-        if self.is_eagle and value is not None:
-            # Make sure the value len equal to the EAGLE bigram key len
-            value = value[: len(key)]
 
         node = self.root_node
         child_key = self.get_child_key_fn(key)
