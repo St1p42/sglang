@@ -5,6 +5,7 @@ import json
 import logging
 import threading
 import time
+from functools import partial
 from typing import TYPE_CHECKING, List, Optional
 
 import torch
@@ -20,7 +21,10 @@ from sglang.srt.mem_cache.radix_cache import (
     RadixCache,
     RadixKey,
     TreeNode,
+    _key_match_page_size1,
+    _key_match_paged,
     compute_node_hash_values,
+    get_child_key,
     split_node_hash_value,
 )
 from sglang.srt.metrics.collector import StorageMetricsCollector
@@ -124,6 +128,13 @@ class CustomHiRadixCache(RadixCache):
         )
         self.min_backup_len = max(1, getattr(server_args, "hicache_min_backup_len", 128))
         self.load_back_threshold = 10
+
+        if self.page_size == 1:
+            self.key_match_fn = _key_match_page_size1
+            self.get_child_key_fn = get_child_key
+        else:
+            self.key_match_fn = partial(_key_match_paged, page_size=self.page_size)
+            self.get_child_key_fn = partial(get_child_key, page_size=self.page_size)
 
         logger.info(
             "Using custom HiCache with length-gated host backup: min_backup_len=%d",
