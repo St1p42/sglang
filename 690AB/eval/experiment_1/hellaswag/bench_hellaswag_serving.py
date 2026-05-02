@@ -9,7 +9,6 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
-from sglang.test.test_utils import get_call_select, select_sglang_backend
 from sglang.utils import download_and_cache_file, read_jsonl
 
 
@@ -77,6 +76,7 @@ def print_metrics(metrics: Metrics, extended_metrics: Dict[str, float]) -> None:
 def run_sglang(args, arguments, choices, labels, few_shot_examples):
     import sglang as sgl
     from sglang.lang.api import set_default_backend
+    from sglang.test.test_utils import select_sglang_backend
 
     set_default_backend(select_sglang_backend(args))
 
@@ -113,6 +113,8 @@ def run_sglang(args, arguments, choices, labels, few_shot_examples):
 
 
 def run_vllm(args, questions, choices, labels, few_shot_examples):
+    from sglang.test.test_utils import get_call_select
+
     call_select = get_call_select(args)
     records: List[Optional[RequestRecord]] = [None] * len(labels)
 
