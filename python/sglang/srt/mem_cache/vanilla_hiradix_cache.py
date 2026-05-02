@@ -5,6 +5,7 @@ import json
 import logging
 import threading
 import time
+from functools import partial
 from typing import TYPE_CHECKING, List, Optional
 
 import torch
@@ -15,6 +16,11 @@ from sglang.srt.mem_cache.memory_pool import MHATokenToKVPool, MLATokenToKVPool
 from sglang.srt.mem_cache.memory_pool_host import (
     MHATokenToKVPoolHost,
     MLATokenToKVPoolHost,
+)
+from sglang.srt.mem_cache.radix_cache_vanilla import (
+    _key_match_page_size1,
+    _key_match_paged,
+    get_child_key,
 )
 from sglang.srt.mem_cache.radix_cache import (
     RadixCache,
@@ -125,6 +131,12 @@ class VanillaHiRadixCache(RadixCache):
         self.load_back_threshold = 10
 
         super().__init__(params=params)
+        if self.page_size == 1:
+            self.key_match_fn = _key_match_page_size1
+            self.get_child_key_fn = get_child_key
+        else:
+            self.key_match_fn = partial(_key_match_paged, page_size=self.page_size)
+            self.get_child_key_fn = partial(get_child_key, page_size=self.page_size)
 
     def _parse_storage_backend_extra_config(
         self, storage_backend_extra_config: Optional[str]
