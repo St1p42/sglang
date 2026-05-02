@@ -64,28 +64,34 @@ def read_jsonl(path: str):
 
 
 def call_select_vllm(context: str, choices: List[str], url: str) -> int:
-    data = {
-        "prompt": context,
-        "temperature": 0.0,
-        "max_tokens": 1,
-        "logprobs": 100,
-        "n": 1,
-    }
-    res = requests.post(url, json=data, timeout=REQUEST_TIMEOUT)
-    res.raise_for_status()
-    obj = res.json()
-    meta = obj.get("meta_info", {})
-    output_top_logprobs = meta.get("output_top_logprobs", [])
-    token_logprobs = output_top_logprobs[0] if output_top_logprobs else []
-    norm_choices = [choice.strip() for choice in choices]
     scores = []
-    for choice in norm_choices:
-        score = None
-        for candidate in token_logprobs:
-            if candidate.get("token", "").strip() == choice:
-                score = candidate.get("logprob", float("-inf"))
-                break
-        scores.append(float("-inf") if score is None else score)
+    for choice in choices:
+        data = {
+            "prompt": context + choice,
+            "max_tokens": 1,
+            "prompt_logprobs": 1,
+        }
+        res = requests.post(url, json=data, timeout=REQUEST_TIMEOUT)
+        res.raise_for_status()
+        obj = res.json()
+
+        if "prompt_score" in obj:
+            scores.append(obj["prompt_score"])
+            continue
+
+        prompt_logprobs = obj.get("prompt_logprobs")
+        prompt_token_ids = obj.get("prompt_token_ids")
+        if prompt_logprobs and prompt_token_ids:
+            token_scores = []
+            for token_id, prob in zip(prompt_token_ids[1:], prompt_logprobs[1:]):
+                if prob is None:
+                    continue
+                token_scores.append(prob.get(str(token_id), float("-inf")))
+            if token_scores:
+                scores.append(float(np.mean(token_scores)))
+                continue
+
+        scores.append(float("-inf"))
     return int(np.argmax(scores))
 
 
