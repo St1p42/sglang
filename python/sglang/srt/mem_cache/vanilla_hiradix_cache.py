@@ -152,6 +152,8 @@ class VanillaHiRadixCache(RadixCache):
             node.host_ref_counter = 0
         if not hasattr(node, "priority"):
             node.priority = 0
+        if not hasattr(node, "hit_count"):
+            node.hit_count = 0
         if not hasattr(node, "hash_value"):
             node.hash_value = []
         if not hasattr(node, "last_access_time"):
