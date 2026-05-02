@@ -16,7 +16,6 @@ from sglang.utils import download_and_cache_file, read_jsonl
 class RequestRecord:
     request_id: int
     success: bool
-    latency: float
     pred: Optional[int] = None
     label: Optional[int] = None
     error: str = ""
@@ -25,7 +24,6 @@ class RequestRecord:
 @dataclass
 class Metrics:
     request_throughput: float = 0.0
-    mean_e2e_latency_ms: float = 0.0
     accuracy: float = 0.0
 
 
@@ -43,33 +41,11 @@ def get_few_shot_examples(lines, k):
     return ret
 
 
-def compute_extended_metrics(records: List[RequestRecord]) -> Dict[str, float]:
-    successful = [record for record in records if record.success]
-    if not successful:
-        return {}
-    lat_ms = np.array([record.latency for record in successful], dtype=float) * 1000.0
-    return {
-        "median_e2e_latency_ms": float(np.percentile(lat_ms, 50)),
-        "p90_e2e_latency_ms": float(np.percentile(lat_ms, 90)),
-        "p95_e2e_latency_ms": float(np.percentile(lat_ms, 95)),
-        "p99_e2e_latency_ms": float(np.percentile(lat_ms, 99)),
-        "std_e2e_latency_ms": float(np.std(lat_ms)),
-        "max_e2e_latency_ms": float(np.max(lat_ms)),
-    }
-
-
-def print_metrics(metrics: Metrics, extended_metrics: Dict[str, float]) -> None:
+def print_metrics(metrics: Metrics, duration: float) -> None:
     print("\n{:=^60}".format(" HellaSwag Benchmark Result "))
     print("{:<45} {:<10.2f}".format("Request Throughput (req/s)", metrics.request_throughput))
     print("{:<45} {:<10.4f}".format("Accuracy", metrics.accuracy))
-    print("{:-^60}".format(" Latency "))
-    print("{:<45} {:<10.2f}".format("Mean E2E Latency (ms)", metrics.mean_e2e_latency_ms))
-    if extended_metrics:
-        print("{:<45} {:<10.2f}".format("Median E2E Latency (ms)", extended_metrics["median_e2e_latency_ms"]))
-        print("{:<45} {:<10.2f}".format("P90 E2E Latency (ms)", extended_metrics["p90_e2e_latency_ms"]))
-        print("{:<45} {:<10.2f}".format("P95 E2E Latency (ms)", extended_metrics["p95_e2e_latency_ms"]))
-        print("{:<45} {:<10.2f}".format("P99 E2E Latency (ms)", extended_metrics["p99_e2e_latency_ms"]))
-        print("{:<45} {:<10.2f}".format("Std E2E Latency (ms)", extended_metrics["std_e2e_latency_ms"]))
+    print("{:<45} {:<10.2f}".format("Batch Duration (s)", duration))
     print("=" * 60)
 
 
@@ -85,44 +61,36 @@ def run_sglang(args, arguments, choices, labels, few_shot_examples):
         s += few_shot_examples + question
         s += sgl.select("answer", choices=choices)
 
-    records: List[Optional[RequestRecord]] = [None] * len(arguments)
-
-    def get_one_answer(i):
-        start = time.perf_counter()
+    start = time.perf_counter()
+    states = few_shot_hellaswag.run_batch(
+        arguments,
+        temperature=0,
+        num_threads=args.parallel,
+        progress_bar=True,
+    )
+    duration = time.perf_counter() - start
+    records: List[RequestRecord] = []
+    for i, state in enumerate(states):
         try:
-            state = few_shot_hellaswag.run(
-                question=arguments[i]["question"],
-                choices=arguments[i]["choices"],
-                temperature=0,
-            )
-            latency = time.perf_counter() - start
             pred = choices[i].index(state["answer"])
-            records[i] = RequestRecord(
-                request_id=i,
-                success=True,
-                latency=latency,
-                pred=pred,
-                label=labels[i],
+            records.append(
+                RequestRecord(
+                    request_id=i,
+                    success=True,
+                    pred=pred,
+                    label=labels[i],
+                )
             )
         except Exception as exc:
-            latency = time.perf_counter() - start
-            records[i] = RequestRecord(
-                request_id=i,
-                success=False,
-                latency=latency,
-                label=labels[i],
-                error=str(exc),
+            records.append(
+                RequestRecord(
+                    request_id=i,
+                    success=False,
+                    label=labels[i],
+                    error=str(exc),
+                )
             )
-
-    start = time.perf_counter()
-    if args.parallel == 1:
-        for i in range(len(arguments)):
-            get_one_answer(i)
-    else:
-        with ThreadPoolExecutor(args.parallel) as executor:
-            list(executor.map(get_one_answer, list(range(len(arguments)))))
-    duration = time.perf_counter() - start
-    return duration, [record for record in records if record is not None]
+    return duration, records
 
 
 def run_vllm(args, questions, choices, labels, few_shot_examples):
@@ -132,23 +100,18 @@ def run_vllm(args, questions, choices, labels, few_shot_examples):
     records: List[Optional[RequestRecord]] = [None] * len(labels)
 
     def get_one_answer(i):
-        start = time.perf_counter()
         try:
             pred = call_select(context=few_shot_examples + questions[i], choices=choices[i])
-            latency = time.perf_counter() - start
             records[i] = RequestRecord(
                 request_id=i,
                 success=True,
-                latency=latency,
                 pred=pred,
                 label=labels[i],
             )
         except Exception as exc:
-            latency = time.perf_counter() - start
             records[i] = RequestRecord(
                 request_id=i,
                 success=False,
-                latency=latency,
                 label=labels[i],
                 error=str(exc),
             )
@@ -211,12 +174,10 @@ def main():
     accuracy = 0.0 if not successful else float(np.mean([record.pred == record.label for record in successful]))
     metrics = Metrics(
         request_throughput=0.0 if duration <= 0 else len(successful) / duration,
-        mean_e2e_latency_ms=0.0 if not successful else float(np.mean([record.latency for record in successful]) * 1000.0),
         accuracy=accuracy,
     )
-    extended_metrics = compute_extended_metrics(records)
     print(f"Batch duration: {duration:.3f}")
-    print_metrics(metrics, extended_metrics)
+    print_metrics(metrics, duration)
 
     result = {
         "task": "hellaswag",
@@ -228,14 +189,12 @@ def main():
         "num_requests": args.num_questions,
         "duration": duration,
         "metrics": asdict(metrics),
-        "extended_metrics": extended_metrics,
         "other": {
             "num_questions": args.num_questions,
             "num_shots": args.num_shots,
             "parallel": args.parallel,
         },
         "details": {
-            "latencies": [record.latency for record in records],
             "success": [record.success for record in records],
             "errors": [record.error for record in records],
             "preds": [record.pred for record in records],
