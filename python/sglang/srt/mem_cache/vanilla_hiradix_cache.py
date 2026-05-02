@@ -137,6 +137,32 @@ class VanillaHiRadixCache(RadixCache):
         else:
             self.key_match_fn = partial(_key_match_paged, page_size=self.page_size)
             self.get_child_key_fn = partial(get_child_key, page_size=self.page_size)
+        self._ensure_node_state(self.root_node)
+
+    def _ensure_node_state(self, node):
+        if hasattr(node, "token_segment"):
+            extra_key = getattr(node, "extra_key", None)
+            node.key = RadixKey(list(node.token_segment), extra_key)
+            node.value = getattr(node, "kv_indices", None)
+        if not hasattr(node, "host_value"):
+            node.host_value = None
+        if not hasattr(node, "host_ref_counter"):
+            node.host_ref_counter = 0
+        if not hasattr(node, "priority"):
+            node.priority = 0
+        if not hasattr(node, "hash_value"):
+            node.hash_value = []
+        if not hasattr(node, "last_access_time"):
+            node.last_access_time = time.monotonic()
+        node.backuped = node.host_value is not None
+        node.evicted = node is not self.root_node and getattr(node, "value", None) is None
+        return node
+
+    def _set_device_indices(self, node, value) -> None:
+        if hasattr(node, "kv_indices"):
+            node.kv_indices = value
+        node.value = value
+        node.evicted = node is not self.root_node and value is None
 
     def _parse_storage_backend_extra_config(
         self, storage_backend_extra_config: Optional[str]
@@ -264,6 +290,7 @@ class VanillaHiRadixCache(RadixCache):
         # skip the hit count update for chunked requests
         if self.cache_controller.write_policy == "write_back" or chunked:
             return
+        self._ensure_node_state(node)
         node.hit_count += 1
 
         if not node.backuped:
@@ -380,7 +407,7 @@ class VanillaHiRadixCache(RadixCache):
         num_evicted = self.cache_controller.evict_device(node.value)
         assert num_evicted > 0
         self.evictable_size_ -= num_evicted
-        node.value = None
+        self._set_device_indices(node, None)
         return num_evicted
 
     def _evict_regular(self, node: TreeNode):
@@ -696,6 +723,7 @@ class VanillaHiRadixCache(RadixCache):
             key = key[:page_aligned_len]
 
         value, last_node = self._match_prefix_helper(self.root_node, key)
+        self._ensure_node_state(last_node)
         if value:
             value = torch.cat(value)
         else:
@@ -704,10 +732,13 @@ class VanillaHiRadixCache(RadixCache):
         host_hit_length = 0
         last_host_node = last_node
         while last_node.evicted:
+            self._ensure_node_state(last_node)
             host_hit_length += len(last_node.host_value)
             last_node = last_node.parent
+            self._ensure_node_state(last_node)
         while not last_host_node.backuped:
             last_host_node = last_host_node.parent
+            self._ensure_node_state(last_host_node)
 
         return MatchResult(
             device_indices=value,
@@ -759,6 +790,7 @@ class VanillaHiRadixCache(RadixCache):
     def _insert_helper_host(
         self, node: TreeNode, key: RadixKey, host_value, hash_value
     ):
+        self._ensure_node_state(node)
         node.last_access_time = time.monotonic()
         if len(key) == 0:
             return 0
@@ -768,6 +800,7 @@ class VanillaHiRadixCache(RadixCache):
         matched_length = 0
         while len(key) > 0 and child_key in node.children.keys():
             node = node.children[child_key]
+            self._ensure_node_state(node)
             node.last_access_time = time.monotonic()
             prefix_len = self.key_match_fn(node.key, key)
             key = key[prefix_len:]
@@ -789,20 +822,24 @@ class VanillaHiRadixCache(RadixCache):
             new_node.value = None
             new_node.host_value = host_value
             new_node.hash_value = hash_value
+            self._ensure_node_state(new_node)
             node.children[child_key] = new_node
         return matched_length
 
     def _match_prefix_helper(self, node: TreeNode, key: RadixKey):
+        self._ensure_node_state(node)
         node.last_access_time = time.monotonic()
         child_key = self.get_child_key_fn(key)
         value = []
 
         while len(key) > 0 and child_key in node.children.keys():
             child = node.children[child_key]
+            self._ensure_node_state(child)
             child.last_access_time = time.monotonic()
             prefix_len = self.key_match_fn(child.key, key)
             if prefix_len < len(child.key):
                 new_node = self._split_node(child.key, child, prefix_len)
+                self._ensure_node_state(new_node)
                 if not new_node.evicted:
                     value.append(new_node.value)
                 node = new_node
@@ -819,6 +856,7 @@ class VanillaHiRadixCache(RadixCache):
         return value, node
 
     def _split_node(self, key: RadixKey, child: TreeNode, split_len: int):
+        self._ensure_node_state(child)
         # child node split into new_node -> child
         new_node = TreeNode(priority=child.priority)
         new_node.children = {self.get_child_key_fn(key[split_len:]): child}
@@ -843,6 +881,8 @@ class VanillaHiRadixCache(RadixCache):
         child.parent = new_node
         child.key = child.key[split_len:]
         new_node.parent.children[self.get_child_key_fn(key)] = new_node
+        self._ensure_node_state(new_node)
+        self._ensure_node_state(child)
         return new_node
 
     def insert(
@@ -859,11 +899,13 @@ class VanillaHiRadixCache(RadixCache):
             return 0
 
         node = self.root_node
+        self._ensure_node_state(node)
         child_key = self.get_child_key_fn(key)
         total_prefix_length = 0
 
         while len(key) > 0 and child_key in node.children.keys():
             node = node.children[child_key]
+            self._ensure_node_state(node)
             node.last_access_time = time.monotonic()
             node.priority = max(node.priority, priority)
             prefix_len = self.key_match_fn(node.key, key)
@@ -872,7 +914,7 @@ class VanillaHiRadixCache(RadixCache):
                 if node.evicted:
                     # change the reference if the node is evicted
                     # this often happens in the case of KV cache recomputation
-                    node.value = value[:prefix_len]
+                    self._set_device_indices(node, value[:prefix_len])
                     self.evictable_size_ += len(node.value)
                 else:
                     self._inc_hit_count(node, chunked)
@@ -883,7 +925,7 @@ class VanillaHiRadixCache(RadixCache):
                 # shared-prefix node should also reflect max priority
                 new_node.priority = max(new_node.priority, priority)
                 if new_node.evicted:
-                    new_node.value = value[:prefix_len]
+                    self._set_device_indices(new_node, value[:prefix_len])
                     self.evictable_size_ += len(new_node.value)
                 else:
                     self._inc_hit_count(new_node, chunked)
@@ -900,8 +942,9 @@ class VanillaHiRadixCache(RadixCache):
             new_node = TreeNode(priority=priority)
             new_node.parent = node
             new_node.key = key
-            new_node.value = value
+            self._set_device_indices(new_node, value)
             node.children[child_key] = new_node
+            self._ensure_node_state(new_node)
             self.evictable_size_ += len(value)
 
             # Compute hash_value if storage is enabled
