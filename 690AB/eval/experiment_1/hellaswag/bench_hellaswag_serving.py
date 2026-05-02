@@ -4,12 +4,11 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
-from functools import partial
+from pathlib import Path
 from typing import Dict, List, Optional
 
 import numpy as np
-
-from sglang.utils import download_and_cache_file, read_jsonl
+import requests
 
 
 @dataclass
@@ -27,6 +26,9 @@ class Metrics:
     accuracy: float = 0.0
 
 
+REQUEST_TIMEOUT = 600
+
+
 def get_one_example(lines, i, include_answer):
     ret = lines[i]["activity_label"] + ": " + lines[i]["ctx"] + " "
     if include_answer:
@@ -39,6 +41,52 @@ def get_few_shot_examples(lines, k):
     for i in range(k):
         ret += get_one_example(lines, i, True) + "\n\n"
     return ret
+
+
+def download_and_cache_file(url: str, filename: Optional[str] = None) -> str:
+    if filename is None:
+        filename = os.path.basename(url)
+    cache_path = Path(filename)
+    if cache_path.exists():
+        return str(cache_path)
+    response = requests.get(url, timeout=REQUEST_TIMEOUT)
+    response.raise_for_status()
+    cache_path.write_text(response.text, encoding="utf-8")
+    return str(cache_path)
+
+
+def read_jsonl(path: str):
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                yield json.loads(line)
+
+
+def call_select_vllm(context: str, choices: List[str], url: str) -> int:
+    data = {
+        "prompt": context,
+        "temperature": 0.0,
+        "max_tokens": 1,
+        "logprobs": 100,
+        "n": 1,
+    }
+    res = requests.post(url, json=data, timeout=REQUEST_TIMEOUT)
+    res.raise_for_status()
+    obj = res.json()
+    meta = obj.get("meta_info", {})
+    output_top_logprobs = meta.get("output_top_logprobs", [])
+    token_logprobs = output_top_logprobs[0] if output_top_logprobs else []
+    norm_choices = [choice.strip() for choice in choices]
+    scores = []
+    for choice in norm_choices:
+        score = None
+        for candidate in token_logprobs:
+            if candidate.get("token", "").strip() == choice:
+                score = candidate.get("logprob", float("-inf"))
+                break
+        scores.append(float("-inf") if score is None else score)
+    return int(np.argmax(scores))
 
 
 def print_metrics(metrics: Metrics, duration: float) -> None:
@@ -94,14 +142,16 @@ def run_sglang(args, arguments, choices, labels, few_shot_examples):
 
 
 def run_vllm(args, questions, choices, labels, few_shot_examples):
-    from sglang.test.test_utils import get_call_select
-
-    call_select = get_call_select(args)
+    url = f"{args.host}:{args.port}/generate"
     records: List[Optional[RequestRecord]] = [None] * len(labels)
 
     def get_one_answer(i):
         try:
-            pred = call_select(context=few_shot_examples + questions[i], choices=choices[i])
+            pred = call_select_vllm(
+                context=few_shot_examples + questions[i],
+                choices=choices[i],
+                url=url,
+            )
             records[i] = RequestRecord(
                 request_id=i,
                 success=True,
