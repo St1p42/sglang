@@ -76,9 +76,9 @@ def print_metrics(metrics: Metrics, extended_metrics: Dict[str, float]) -> None:
 def run_sglang(args, arguments, choices, labels, few_shot_examples):
     import sglang as sgl
     from sglang.lang.api import set_default_backend
-    from sglang.test.test_utils import select_sglang_backend
+    from sglang.lang.backend.runtime_endpoint import RuntimeEndpoint
 
-    set_default_backend(select_sglang_backend(args))
+    set_default_backend(RuntimeEndpoint(f"{args.host}:{args.port}"))
 
     @sgl.function
     def few_shot_hellaswag(s, question, choices):
