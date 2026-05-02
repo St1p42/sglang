@@ -39,6 +39,12 @@ logger = logging.getLogger(__name__)
 class CustomHiRadixCache(RadixCache):
 
     def __init__(self, params: CacheInitParams, server_args: ServerArgs):
+        # This experiment changes only HiCache backup policy. Force the radix-tree
+        # backend used by HiCache to the vanilla node model so the custom HiCache
+        # implementation remains compatible even when the outer server launch uses
+        # the custom radix path for other components.
+        params.radix_cache_impl = "vanilla"
+
         if server_args.hicache_io_backend == "direct":
             # FIXME: move this logic into server_args parsing
             if server_args.hicache_mem_layout == "page_first":
