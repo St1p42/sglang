@@ -140,6 +140,8 @@ class VanillaHiRadixCache(RadixCache):
         self._ensure_node_state(self.root_node)
 
     def _ensure_node_state(self, node):
+        if node is None:
+            return None
         if hasattr(node, "token_segment"):
             extra_key = getattr(node, "extra_key", None)
             node.key = RadixKey(list(node.token_segment), extra_key)
@@ -736,7 +738,7 @@ class VanillaHiRadixCache(RadixCache):
             host_hit_length += len(last_node.host_value)
             last_node = last_node.parent
             self._ensure_node_state(last_node)
-        while not last_host_node.backuped:
+        while last_host_node is not self.root_node and not last_host_node.backuped:
             last_host_node = last_host_node.parent
             self._ensure_node_state(last_host_node)
 
