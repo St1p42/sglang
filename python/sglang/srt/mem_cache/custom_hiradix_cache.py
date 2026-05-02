@@ -462,7 +462,7 @@ class CustomHiRadixCache(RadixCache):
     def evict(self, num_tokens: int):
         start_time = time.perf_counter()
         eviction_heap = [
-            (self._node_priority(node), node)
+            (self._node_priority(node), id(node), node)
             for node in self._collect_device_leaves()
         ]
         heapq.heapify(eviction_heap)
@@ -470,7 +470,7 @@ class CustomHiRadixCache(RadixCache):
         num_evicted = 0
         write_back_nodes = []
         while num_evicted < num_tokens and eviction_heap:
-            _priority, node = heapq.heappop(eviction_heap)
+            _priority, _tie_breaker, node = heapq.heappop(eviction_heap)
             if node.lock_ref > 0:
                 continue
 
@@ -494,7 +494,7 @@ class CustomHiRadixCache(RadixCache):
             else:
                 heapq.heappush(
                     eviction_heap,
-                    (self._node_priority(node.parent), node.parent),
+                    (self._node_priority(node.parent), id(node.parent), node.parent),
                 )
 
         if self.cache_controller.write_policy == "write_back":
@@ -506,14 +506,14 @@ class CustomHiRadixCache(RadixCache):
 
     def evict_host(self, num_tokens: int):
         eviction_heap = [
-            (self._node_priority(node), node)
+            (self._node_priority(node), id(node), node)
             for node in self._collect_host_leaves()
         ]
         heapq.heapify(eviction_heap)
 
         num_evicted = 0
         while num_evicted < num_tokens and eviction_heap:
-            _priority, node = heapq.heappop(eviction_heap)
+            _priority, _tie_breaker, node = heapq.heappop(eviction_heap)
             if node == self.root_node or not self._node_is_evicted(node):
                 continue
             if node.host_ref_counter > 0:
@@ -529,7 +529,7 @@ class CustomHiRadixCache(RadixCache):
             if len(node.parent.children) == 0 and self._node_is_evicted(node.parent):
                 heapq.heappush(
                     eviction_heap,
-                    (self._node_priority(node.parent), node.parent),
+                    (self._node_priority(node.parent), id(node.parent), node.parent),
                 )
 
     def load_back(
