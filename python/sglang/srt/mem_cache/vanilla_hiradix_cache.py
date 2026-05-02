@@ -142,7 +142,8 @@ class VanillaHiRadixCache(RadixCache):
     def _ensure_node_state(self, node):
         if node is None:
             return None
-        if hasattr(node, "token_segment"):
+        is_custom_node = hasattr(node, "token_segment")
+        if is_custom_node:
             extra_key = getattr(node, "extra_key", None)
             node.key = RadixKey(list(node.token_segment), extra_key)
             node.value = getattr(node, "kv_indices", None)
@@ -158,15 +159,20 @@ class VanillaHiRadixCache(RadixCache):
             node.hash_value = []
         if not hasattr(node, "last_access_time"):
             node.last_access_time = time.monotonic()
-        node.backuped = node.host_value is not None
-        node.evicted = node is not self.root_node and getattr(node, "value", None) is None
+        if is_custom_node:
+            node.backuped = node.host_value is not None
+            node.evicted = (
+                node is not self.root_node and getattr(node, "value", None) is None
+            )
         return node
 
     def _set_device_indices(self, node, value) -> None:
-        if hasattr(node, "kv_indices"):
+        is_custom_node = hasattr(node, "kv_indices")
+        if is_custom_node:
             node.kv_indices = value
         node.value = value
-        node.evicted = node is not self.root_node and value is None
+        if is_custom_node:
+            node.evicted = node is not self.root_node and value is None
 
     def _parse_storage_backend_extra_config(
         self, storage_backend_extra_config: Optional[str]
