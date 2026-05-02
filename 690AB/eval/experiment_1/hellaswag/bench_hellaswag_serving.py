@@ -85,31 +85,44 @@ def run_sglang(args, arguments, choices, labels, few_shot_examples):
         s += few_shot_examples + question
         s += sgl.select("answer", choices=choices)
 
-    start = time.perf_counter()
-    states = few_shot_hellaswag.run_batch(
-        arguments,
-        temperature=0,
-        num_threads=args.parallel,
-        progress_bar=True,
-    )
-    duration = time.perf_counter() - start
+    records: List[Optional[RequestRecord]] = [None] * len(arguments)
 
-    records = []
-    for i, state in enumerate(states):
-        pred = choices[i].index(state["answer"])
-        meta_info = state.get_meta_info("answer") or {}
-        latency_ms = meta_info.get("e2e_latency")
-        latency_s = duration / len(states) if latency_ms is None else float(latency_ms)
-        records.append(
-            RequestRecord(
+    def get_one_answer(i):
+        start = time.perf_counter()
+        try:
+            state = few_shot_hellaswag.run(
+                question=arguments[i]["question"],
+                choices=arguments[i]["choices"],
+                temperature=0,
+            )
+            latency = time.perf_counter() - start
+            pred = choices[i].index(state["answer"])
+            records[i] = RequestRecord(
                 request_id=i,
                 success=True,
-                latency=latency_s,
+                latency=latency,
                 pred=pred,
                 label=labels[i],
             )
-        )
-    return duration, records
+        except Exception as exc:
+            latency = time.perf_counter() - start
+            records[i] = RequestRecord(
+                request_id=i,
+                success=False,
+                latency=latency,
+                label=labels[i],
+                error=str(exc),
+            )
+
+    start = time.perf_counter()
+    if args.parallel == 1:
+        for i in range(len(arguments)):
+            get_one_answer(i)
+    else:
+        with ThreadPoolExecutor(args.parallel) as executor:
+            list(executor.map(get_one_answer, list(range(len(arguments)))))
+    duration = time.perf_counter() - start
+    return duration, [record for record in records if record is not None]
 
 
 def run_vllm(args, questions, choices, labels, few_shot_examples):
