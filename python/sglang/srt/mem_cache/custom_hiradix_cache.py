@@ -88,6 +88,9 @@ class CustomHiRadixCache(RadixCache):
         self.write_through_threshold = (
             1 if server_args.hicache_write_policy == "write_through" else 2
         )
+        self.custom_backup_policy = getattr(
+            server_args, "hicache_custom_backup_policy", "length_gated"
+        )
         self.min_backup_len = max(
             1, getattr(server_args, "hicache_min_backup_len", 128)
         )
@@ -98,10 +101,13 @@ class CustomHiRadixCache(RadixCache):
         self.protected_size_ = self.impl.protected_size_
         self._ensure_node_state(self.root_node, extra_key=None)
 
-        logger.info(
-            "Using custom HiCache with length-gated host backup: min_backup_len=%d",
-            self.min_backup_len,
-        )
+        if self.custom_backup_policy == "baseline":
+            logger.info("Using custom HiCache with baseline host backup policy")
+        else:
+            logger.info(
+                "Using custom HiCache with length-gated host backup: min_backup_len=%d",
+                self.min_backup_len,
+            )
 
     def _validate_custom_config(
         self, params: CacheInitParams, server_args: ServerArgs
@@ -343,6 +349,8 @@ class CustomHiRadixCache(RadixCache):
         return len(backup_indices)
 
     def _should_backup_to_host(self, node: _CustomRadixNode) -> bool:
+        if self.custom_backup_policy == "baseline":
+            return True
         return self._node_token_len(node) >= self.min_backup_len
 
     def _inc_hit_count(self, node: _CustomRadixNode, chunked=False):

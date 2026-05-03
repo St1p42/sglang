@@ -438,6 +438,7 @@ class ServerArgs:
     # Hierarchical cache
     enable_hierarchical_cache: bool = False
     hicache_impl: str = "vanilla"
+    hicache_custom_backup_policy: str = "length_gated"
     hicache_min_backup_len: int = 128
     hicache_ratio: float = 2.0
     hicache_size: int = 0
@@ -3219,6 +3220,13 @@ class ServerArgs:
             choices=["vanilla", "custom"],
             default=ServerArgs.hicache_impl,
             help="Choose the HiCache implementation to use when hierarchical cache is enabled.",
+        )
+        parser.add_argument(
+            "--hicache-custom-backup-policy",
+            type=str,
+            choices=["baseline", "length_gated"],
+            default=ServerArgs.hicache_custom_backup_policy,
+            help="Backup policy used only by the custom HiCache implementation.",
         )
         parser.add_argument(
             "--hicache-min-backup-len",
