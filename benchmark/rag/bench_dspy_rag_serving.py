@@ -286,8 +286,9 @@ class DSPyRAG(dspy.Module):
 
 def parse_args():
     p = argparse.ArgumentParser(description='DSPy RAG benchmark with embedding retriever')
+    p.add_argument('--backend', type=str, default='sglang', choices=['sglang', 'vllm'])
     p.add_argument('--host', type=str, default='127.0.0.1')
-    p.add_argument('--port', type=int, default=30000)
+    p.add_argument('--port', type=int, default=None)
     p.add_argument('--model', type=str, required=True)
     p.add_argument('--parallel', type=int, default=8)
     p.add_argument('--num-questions', type=int, default=64,
@@ -308,7 +309,11 @@ def parse_args():
                    help='Number of passages to retrieve per query.')
     p.add_argument('--result-file', type=str, default='result_serving.jsonl')
     p.add_argument('--raw-result-file', type=str, default=None)
-    return p.parse_args()
+    p.add_argument('--run-id', type=str, default=None)
+    args = p.parse_args()
+    if args.port is None:
+        args.port = 30000 if args.backend == 'sglang' else 21000
+    return args
 
 
 def load_workload_jsonl(path: str, max_requests: Optional[int] = None) -> List[WorkloadRow]:
@@ -442,9 +447,38 @@ async def async_request_sglang_generate(session, url, prompt, prompt_len, output
         return output, cached_tokens
 
 
+async def async_request_vllm_generate(session, url, prompt, prompt_len, output_len):
+    payload = {
+        'prompt': prompt,
+        'temperature': 0.0,
+        'max_tokens': output_len,
+        'n': 1,
+    }
+    output = RequestFuncOutput(prompt_len=prompt_len)
+    st = time.perf_counter()
+    output.start_time = st
+    try:
+        async with session.post(url=url, json=payload) as response:
+            if response.status != 200:
+                output.error = response.reason or ''
+                return output, 0
+            data = await response.json()
+            text = data.get('text', [''])
+            generated = text[0][len(prompt):] if text else ''
+            output.generated_text = generated
+            output.output_len = output_len
+            output.success = True
+            output.latency = time.perf_counter() - st
+            return output, 0
+    except Exception as e:
+        output.error = str(e)
+        return output, 0
+
+
 async def run_all(args, questions, rag, tokenizer, gt_answers, workload_rows: Optional[List[WorkloadRow]] = None):
     url = f'http://{args.host}:{args.port}/generate'
     sem = asyncio.Semaphore(args.parallel)
+    request_fn = async_request_sglang_generate if args.backend == 'sglang' else async_request_vllm_generate
 
     async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
         async def one_synthetic(i: int, q: str, gt: str):
@@ -452,7 +486,7 @@ async def run_all(args, questions, rag, tokenizer, gt_answers, workload_rows: Op
                 passages = rag.retriever(q)
                 prompt = f'Context:\n{chr(10).join(passages)}\n\nQuestion: {q}\nAnswer:'
                 prompt_len = len(tokenizer(prompt).input_ids)
-                out, cached = await async_request_sglang_generate(session, url, prompt, prompt_len, 32)
+                out, cached = await request_fn(session, url, prompt, prompt_len, 32)
                 out.answer = out.generated_text.strip()
                 out.ground_truth = gt
                 out.passages = passages
@@ -467,7 +501,7 @@ async def run_all(args, questions, rag, tokenizer, gt_answers, workload_rows: Op
             async with sem:
                 prompt = row.prompt
                 prompt_len = len(tokenizer(prompt).input_ids)
-                out, cached = await async_request_sglang_generate(session, url, prompt, prompt_len, 32)
+                out, cached = await request_fn(session, url, prompt, prompt_len, 32)
                 out.answer = out.generated_text.strip()
                 out.ground_truth = row.answer
                 out.passages = []  # No retriever is used for prebuilt JSONL prompts.
@@ -851,6 +885,9 @@ def main():
 
     result = {
         'task': 'dspy_rag_serving',
+        'backend': args.backend,
+        'num_gpus': 1,
+        'run_id': args.run_id,
         'host': args.host,
         'port': args.port,
         'num_requests': len(input_requests),
@@ -871,6 +908,7 @@ def main():
             'latencies':      [o.latency for o in outputs],
             'itls':           [o.itl for o in outputs],
             'cached_tokens':  cached_tokens_per_turn,
+            'success':        [o.success for o in outputs],
             'errors':         [o.error for o in outputs],
             'request_ids':    [getattr(o, 'request_id', None) for o in outputs],
             'group_ids':      [getattr(o, 'group_id', None) for o in outputs],
