@@ -95,6 +95,9 @@ class CustomHiRadixCache(RadixCache):
             1, getattr(server_args, "hicache_min_backup_len", 128)
         )
         self.load_back_threshold = 10
+        self.cpu_admit_total_tokens = 0
+        self.cpu_admit_num_events = 0
+        self.cpu_admit_total_span_len = 0
 
         super().__init__(params=params)
         self.evictable_size_ = self.impl.evictable_size_
@@ -329,12 +332,13 @@ class CustomHiRadixCache(RadixCache):
         req.last_node = new_last_node
 
     def write_backup(self, node: _CustomRadixNode, write_back=False):
+        admit_len = len(node.kv_indices)
         backup_indices = self.cache_controller.write(
             device_indices=node.kv_indices,
             node_id=id(node),
         )
         if backup_indices is None:
-            self.evict_host(len(node.kv_indices))
+            self.evict_host(admit_len)
             backup_indices = self.cache_controller.write(
                 device_indices=node.kv_indices,
                 node_id=id(node),
@@ -343,10 +347,25 @@ class CustomHiRadixCache(RadixCache):
             return 0
 
         self._set_host_indices(node, backup_indices)
+        self.cpu_admit_total_tokens += admit_len
+        self.cpu_admit_num_events += 1
+        self.cpu_admit_total_span_len += admit_len
         self.ongoing_write_through[id(node)] = node
         if not write_back:
             self.inc_lock_ref(node)
         return len(backup_indices)
+
+    def get_runtime_stats(self) -> dict[str, float | int]:
+        avg_cpu_admit_len = (
+            self.cpu_admit_total_span_len / self.cpu_admit_num_events
+            if self.cpu_admit_num_events > 0
+            else 0.0
+        )
+        return {
+            "hicache_cpu_admit_total_tokens": int(self.cpu_admit_total_tokens),
+            "hicache_cpu_admit_events": int(self.cpu_admit_num_events),
+            "hicache_cpu_admit_avg_len": float(avg_cpu_admit_len),
+        }
 
     def _should_backup_to_host(self, node: _CustomRadixNode) -> bool:
         if self.custom_backup_policy == "baseline":

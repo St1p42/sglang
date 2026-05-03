@@ -2322,6 +2322,33 @@ async def benchmark(
             "Total token throughput (tok/s):", metrics.total_throughput
         )
     )
+    hicache_cpu_admit_total_tokens = None
+    hicache_cpu_admit_avg_len = None
+    if (
+        "sglang" in backend
+        and "server_info_json" in locals()
+        and "internal_states" in server_info_json
+        and server_info_json["internal_states"]
+    ):
+        internal_state = server_info_json["internal_states"][0]
+        hicache_cpu_admit_total_tokens = internal_state.get(
+            "hicache_cpu_admit_total_tokens"
+        )
+        hicache_cpu_admit_avg_len = internal_state.get("hicache_cpu_admit_avg_len")
+        if hicache_cpu_admit_total_tokens is not None:
+            print(
+                "{:<40} {:<10}".format(
+                    "HiCache CPU admitted tokens:",
+                    hicache_cpu_admit_total_tokens,
+                )
+            )
+        if hicache_cpu_admit_avg_len is not None:
+            print(
+                "{:<40} {:<10.2f}".format(
+                    "HiCache CPU avg admit len:",
+                    hicache_cpu_admit_avg_len,
+                )
+            )
     print("{:<40} {:<10.2f}".format("Concurrency:", metrics.concurrency))
     if accept_length:
         print("{:<40} {:<10.2f}".format("Accept length:", accept_length))
@@ -2406,6 +2433,8 @@ async def benchmark(
             "accept_length": accept_length,
             "max_output_tokens_per_s": metrics.max_output_tokens_per_s,
             "max_concurrent_requests": metrics.max_concurrent_requests,
+            "hicache_cpu_admit_total_tokens": hicache_cpu_admit_total_tokens,
+            "hicache_cpu_admit_avg_len": hicache_cpu_admit_avg_len,
         }
     else:
         print(f"Error running benchmark for request rate: {request_rate}")
