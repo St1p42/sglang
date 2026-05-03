@@ -15,6 +15,7 @@ import asyncio
 import importlib.util
 import io
 import json
+import math
 import os
 import pickle
 import random
@@ -799,6 +800,12 @@ def get_dataset(args, tokenizer, model_id=None):
             tokenizer=tokenizer,
             args=args,
         )
+    elif args.dataset_name == "generated-shared-prefix-bucketed":
+        assert not tokenize_prompt
+        input_requests = sample_generated_shared_prefix_bucketed_requests(
+            tokenizer=tokenizer,
+            args=args,
+        )
     elif args.dataset_name == "mmmu":
         processor = get_processor(model_id)
         input_requests = sample_mmmu_requests(
@@ -1536,14 +1543,27 @@ def gen_mm_prompt(tokenizer, image_pad_id, token_num):
     return tokenizer.decode(selected_tokens)
 
 
-def get_gen_prefix_cache_path(args, tokenizer):
+def get_gen_prefix_cache_path(
+    args,
+    tokenizer,
+    *,
+    cache_tag: str = "gen_shared_prefix",
+    num_groups: Optional[int] = None,
+    prompts_per_group: Optional[int] = None,
+    system_prompt_len: Optional[int] = None,
+    question_len: Optional[int] = None,
+    output_len: Optional[int] = None,
+):
     """Create cache directory under ~/.cache/sglang/benchmark"""
     cache_dir = Path.home() / ".cache" / "sglang" / "benchmark"
 
     # Create a unique cache filename based on the generation parameters
     cache_key = (
-        f"gen_shared_prefix_{args.seed}_{args.gsp_num_groups}_{args.gsp_prompts_per_group}_"
-        f"{args.gsp_system_prompt_len}_{args.gsp_question_len}_{args.gsp_output_len}_"
+        f"{cache_tag}_{args.seed}_{num_groups if num_groups is not None else args.gsp_num_groups}_"
+        f"{prompts_per_group if prompts_per_group is not None else args.gsp_prompts_per_group}_"
+        f"{system_prompt_len if system_prompt_len is not None else args.gsp_system_prompt_len}_"
+        f"{question_len if question_len is not None else args.gsp_question_len}_"
+        f"{output_len if output_len is not None else args.gsp_output_len}_"
         f"{tokenizer.__class__.__name__}.pkl"
     )
     return cache_dir / cache_key
@@ -1559,7 +1579,15 @@ def sample_generated_shared_prefix_requests(
     args: argparse.Namespace,
 ) -> List[DatasetRow]:
     """Generate benchmark requests with shared system prompts using random tokens and caching."""
-    cache_path = get_gen_prefix_cache_path(args, tokenizer)
+    cache_path = get_gen_prefix_cache_path(
+        args,
+        tokenizer,
+        num_groups=num_groups,
+        prompts_per_group=prompts_per_group,
+        system_prompt_len=system_prompt_len,
+        question_len=question_len,
+        output_len=output_len,
+    )
 
     # Try to load from cache first
     if cache_path.exists():
@@ -1629,6 +1657,120 @@ def sample_generated_shared_prefix_requests(
         pickle.dump(input_requests, f)
 
     return input_requests
+
+
+def _parse_bucket_ints(raw: str, expected_name: str) -> List[int]:
+    values = [x.strip() for x in raw.split(",") if x.strip()]
+    if not values:
+        raise ValueError(f"{expected_name} must contain at least one value")
+    return [int(x) for x in values]
+
+
+def _parse_bucket_floats(raw: str, expected_name: str) -> List[float]:
+    values = [x.strip() for x in raw.split(",") if x.strip()]
+    if not values:
+        raise ValueError(f"{expected_name} must contain at least one value")
+    return [float(x) for x in values]
+
+
+def _normalize_bucket_prompt_counts(num_prompts: int, weights: List[float]) -> List[int]:
+    normalized = np.array(weights, dtype=float)
+    normalized = normalized / normalized.sum()
+    raw_counts = normalized * num_prompts
+    counts = np.floor(raw_counts).astype(int)
+    remainder = num_prompts - int(counts.sum())
+    if remainder > 0:
+        order = np.argsort(-(raw_counts - counts))
+        for idx in order[:remainder]:
+            counts[idx] += 1
+    return counts.tolist()
+
+
+def sample_generated_shared_prefix_bucketed_requests(
+    tokenizer: PreTrainedTokenizerBase,
+    args: argparse.Namespace,
+) -> List[DatasetRow]:
+    system_lens = _parse_bucket_ints(
+        args.gsp_bucket_system_prompt_lens, "--gsp-bucket-system-prompt-lens"
+    )
+    question_lens = _parse_bucket_ints(
+        args.gsp_bucket_question_lens, "--gsp-bucket-question-lens"
+    )
+    output_lens = _parse_bucket_ints(
+        args.gsp_bucket_output_lens, "--gsp-bucket-output-lens"
+    )
+    bucket_weights = _parse_bucket_floats(
+        args.gsp_bucket_weights, "--gsp-bucket-weights"
+    )
+
+    bucket_count = len(system_lens)
+    if not (
+        len(question_lens) == len(output_lens) == len(bucket_weights) == bucket_count
+    ):
+        raise ValueError(
+            "Bucketed shared-prefix dataset requires the same number of system, "
+            "question, output, and weight values."
+        )
+    if any(weight <= 0 for weight in bucket_weights):
+        raise ValueError("Bucket weights must be positive.")
+
+    bucket_prompt_counts = _normalize_bucket_prompt_counts(
+        args.num_prompts, bucket_weights
+    )
+    mixed_requests: List[DatasetRow] = []
+
+    print("\nGenerating bucketed shared-prefix dataset...")
+    print(
+        "Bucket prompt allocation: "
+        + ", ".join(
+            f"{label}={count}"
+            for label, count in zip(
+                [f"bucket{i}" for i in range(bucket_count)], bucket_prompt_counts
+            )
+        )
+    )
+
+    for bucket_idx, bucket_num_prompts in enumerate(bucket_prompt_counts):
+        if bucket_num_prompts == 0:
+            continue
+        bucket_groups = max(
+            1, math.ceil(bucket_num_prompts / args.gsp_prompts_per_group)
+        )
+        bucket_requests = sample_generated_shared_prefix_requests(
+            num_groups=bucket_groups,
+            prompts_per_group=args.gsp_prompts_per_group,
+            system_prompt_len=system_lens[bucket_idx],
+            question_len=question_lens[bucket_idx],
+            output_len=output_lens[bucket_idx],
+            tokenizer=tokenizer,
+            args=args,
+        )
+        if len(bucket_requests) < bucket_num_prompts:
+            raise ValueError(
+                f"Bucket {bucket_idx} produced {len(bucket_requests)} prompts, "
+                f"expected at least {bucket_num_prompts}."
+            )
+        mixed_requests.extend(bucket_requests[:bucket_num_prompts])
+
+    random.shuffle(mixed_requests)
+
+    total_input_tokens = sum(req.prompt_len for req in mixed_requests)
+    total_output_tokens = sum(req.output_len for req in mixed_requests)
+    print("\nBucketed shared prefix dataset statistics:")
+    print(f"Total prompts: {len(mixed_requests)}")
+    print(f"Total input tokens: {total_input_tokens}")
+    print(f"Total output tokens: {total_output_tokens}")
+    print(
+        "Buckets: "
+        + ", ".join(
+            (
+                f"[sys={system_lens[i]}, q={question_lens[i]}, out={output_lens[i]}, "
+                f"weight={bucket_weights[i]}, prompts={bucket_prompt_counts[i]}]"
+            )
+            for i in range(bucket_count)
+        )
+    )
+    return mixed_requests
 
 
 async def get_request(
@@ -2547,6 +2689,7 @@ if __name__ == "__main__":
             "random",
             "random-ids",
             "generated-shared-prefix",
+            "generated-shared-prefix-bucketed",
             "mmmu",
             "image",
             "mooncake",
@@ -2831,6 +2974,30 @@ if __name__ == "__main__":
         type=int,
         default=256,
         help="Target length in tokens for outputs in generated-shared-prefix dataset",
+    )
+    group.add_argument(
+        "--gsp-bucket-system-prompt-lens",
+        type=str,
+        default="512,2048,4096",
+        help="Comma-separated system prompt lengths for generated-shared-prefix-bucketed.",
+    )
+    group.add_argument(
+        "--gsp-bucket-question-lens",
+        type=str,
+        default="32,64,128",
+        help="Comma-separated question lengths for generated-shared-prefix-bucketed.",
+    )
+    group.add_argument(
+        "--gsp-bucket-output-lens",
+        type=str,
+        default="32,64,128",
+        help="Comma-separated output lengths for generated-shared-prefix-bucketed.",
+    )
+    group.add_argument(
+        "--gsp-bucket-weights",
+        type=str,
+        default="0.25,0.35,0.40",
+        help="Comma-separated sampling weights for generated-shared-prefix-bucketed.",
     )
     mooncake_group = parser.add_argument_group("mooncake dataset arguments")
     mooncake_group.add_argument(
