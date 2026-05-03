@@ -1686,6 +1686,26 @@ def _normalize_bucket_prompt_counts(num_prompts: int, weights: List[float]) -> L
     return counts.tolist()
 
 
+def _interleave_bucket_requests(
+    bucket_requests: List[List[DatasetRow]],
+) -> List[DatasetRow]:
+    interleaved: List[DatasetRow] = []
+    bucket_positions = [0] * len(bucket_requests)
+
+    while True:
+        appended = False
+        for bucket_idx, requests in enumerate(bucket_requests):
+            pos = bucket_positions[bucket_idx]
+            if pos < len(requests):
+                interleaved.append(requests[pos])
+                bucket_positions[bucket_idx] += 1
+                appended = True
+        if not appended:
+            break
+
+    return interleaved
+
+
 def sample_generated_shared_prefix_bucketed_requests(
     tokenizer: PreTrainedTokenizerBase,
     args: argparse.Namespace,
@@ -1717,7 +1737,8 @@ def sample_generated_shared_prefix_bucketed_requests(
     bucket_prompt_counts = _normalize_bucket_prompt_counts(
         args.num_prompts, bucket_weights
     )
-    mixed_requests: List[DatasetRow] = []
+    selected_bucket_requests: List[List[DatasetRow]] = []
+    mix_strategy = args.gsp_bucket_mix_strategy
 
     print("\nGenerating bucketed shared-prefix dataset...")
     print(
@@ -1750,9 +1771,17 @@ def sample_generated_shared_prefix_bucketed_requests(
                 f"Bucket {bucket_idx} produced {len(bucket_requests)} prompts, "
                 f"expected at least {bucket_num_prompts}."
             )
-        mixed_requests.extend(bucket_requests[:bucket_num_prompts])
+        selected_bucket_requests.append(bucket_requests[:bucket_num_prompts])
 
-    random.shuffle(mixed_requests)
+    if mix_strategy == "interleave":
+        mixed_requests = _interleave_bucket_requests(selected_bucket_requests)
+    elif mix_strategy == "shuffle":
+        mixed_requests = [
+            req for bucket_requests in selected_bucket_requests for req in bucket_requests
+        ]
+        random.shuffle(mixed_requests)
+    else:
+        raise ValueError(f"Unknown bucket mix strategy: {mix_strategy}")
 
     total_input_tokens = sum(req.prompt_len for req in mixed_requests)
     total_output_tokens = sum(req.output_len for req in mixed_requests)
@@ -1760,6 +1789,7 @@ def sample_generated_shared_prefix_bucketed_requests(
     print(f"Total prompts: {len(mixed_requests)}")
     print(f"Total input tokens: {total_input_tokens}")
     print(f"Total output tokens: {total_output_tokens}")
+    print(f"Mix strategy: {mix_strategy}")
     print(
         "Buckets: "
         + ", ".join(
@@ -2998,6 +3028,13 @@ if __name__ == "__main__":
         type=str,
         default="0.25,0.35,0.40",
         help="Comma-separated sampling weights for generated-shared-prefix-bucketed.",
+    )
+    group.add_argument(
+        "--gsp-bucket-mix-strategy",
+        type=str,
+        choices=["shuffle", "interleave"],
+        default="interleave",
+        help="How to combine bucketed shared-prefix requests into the final workload.",
     )
     mooncake_group = parser.add_argument_group("mooncake dataset arguments")
     mooncake_group.add_argument(
