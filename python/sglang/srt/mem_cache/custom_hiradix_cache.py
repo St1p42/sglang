@@ -100,6 +100,7 @@ class CustomHiRadixCache(RadixCache):
         self.host_backup_total_span_len = 0
         self.host_backup_skipped_by_length_count = 0
         self.host_backup_skipped_by_length_tokens = 0
+        self.host_hit_tokens = 0
 
         super().__init__(params=params)
         self.evictable_size_ = self.impl.evictable_size_
@@ -373,6 +374,7 @@ class CustomHiRadixCache(RadixCache):
             "host_backup_skipped_by_length_tokens": int(
                 self.host_backup_skipped_by_length_tokens
             ),
+            "host_hit_tokens": int(self.host_hit_tokens),
         }
 
     def _record_length_gate_skip(self, node: _CustomRadixNode) -> None:
@@ -392,7 +394,7 @@ class CustomHiRadixCache(RadixCache):
             return
 
         node.hit_count += 1
-        if not self._node_is_backuped(node) and node.hit_count >= self.write_through_threshold:
+        if not self._node_is_backuped(node) and node.hit_count == self.write_through_threshold:
             if self._should_backup_to_host(node):
                 self.write_backup(node)
             else:
@@ -616,6 +618,7 @@ class CustomHiRadixCache(RadixCache):
             )
             offset += len(cur.host_value)
         self.evictable_size_ += len(device_indices)
+        self.host_hit_tokens += len(device_indices)
         self.inc_lock_ref(last_hit_node)
 
         if self.metrics_collector is not None:

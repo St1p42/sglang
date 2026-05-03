@@ -806,6 +806,12 @@ def get_dataset(args, tokenizer, model_id=None):
             tokenizer=tokenizer,
             args=args,
         )
+    elif args.dataset_name == "generated-shared-prefix-nested-bucketed":
+        assert not tokenize_prompt
+        input_requests = sample_generated_shared_prefix_nested_bucketed_requests(
+            tokenizer=tokenizer,
+            args=args,
+        )
     elif args.dataset_name == "mmmu":
         processor = get_processor(model_id)
         input_requests = sample_mmmu_requests(
@@ -1534,6 +1540,12 @@ def gen_prompt(tokenizer, token_num):
     return tokenizer.decode(selected_tokens)
 
 
+def gen_prompt_token_ids(tokenizer, token_num):
+    """Generate a random token-id prompt of specified length."""
+    all_available_tokens = get_available_tokens(tokenizer)
+    return random.choices(all_available_tokens, k=token_num)
+
+
 def gen_mm_prompt(tokenizer, image_pad_id, token_num):
     """Generate a random prompt of specified token length using tokenizer vocabulary."""
     all_available_tokens = list(tokenizer.get_vocab().values())
@@ -1548,6 +1560,7 @@ def get_gen_prefix_cache_path(
     tokenizer,
     *,
     cache_tag: str = "gen_shared_prefix",
+    custom_cache_key: Optional[str] = None,
     num_groups: Optional[int] = None,
     prompts_per_group: Optional[int] = None,
     system_prompt_len: Optional[int] = None,
@@ -1556,6 +1569,9 @@ def get_gen_prefix_cache_path(
 ):
     """Create cache directory under ~/.cache/sglang/benchmark"""
     cache_dir = Path.home() / ".cache" / "sglang" / "benchmark"
+
+    if custom_cache_key is not None:
+        return cache_dir / f"{custom_cache_key}_{tokenizer.__class__.__name__}.pkl"
 
     # Create a unique cache filename based on the generation parameters
     cache_key = (
@@ -1801,6 +1817,158 @@ def sample_generated_shared_prefix_bucketed_requests(
         )
     )
     return mixed_requests
+
+
+def sample_generated_shared_prefix_nested_bucketed_requests(
+    tokenizer: PreTrainedTokenizerBase,
+    args: argparse.Namespace,
+) -> List[DatasetRow]:
+    short_len = args.gsp_nested_short_len
+    mid_len = args.gsp_nested_mid_len
+    long_len = args.gsp_nested_long_len
+    order = args.gsp_nested_order
+
+    if not (short_len < mid_len < long_len):
+        raise ValueError(
+            "Nested shared-prefix lengths must satisfy short < mid < long."
+        )
+    if args.gsp_prompts_per_group % 4 != 0:
+        raise ValueError("--gsp-prompts-per-group must be divisible by 4.")
+
+    short_variants = args.gsp_prompts_per_group // 2
+    mid_variants = args.gsp_prompts_per_group // 4
+    long_variants = args.gsp_prompts_per_group // 4
+    total_prompts = args.gsp_num_groups * args.gsp_prompts_per_group
+
+    cache_key = (
+        "gen_shared_prefix_nested_bucketed_"
+        f"{args.seed}_{args.gsp_num_groups}_{args.gsp_prompts_per_group}_"
+        f"{short_len}_{mid_len}_{long_len}_{args.gsp_question_len}_{args.gsp_output_len}_{order}"
+    )
+    cache_path = get_gen_prefix_cache_path(
+        args,
+        tokenizer,
+        cache_tag="gen_shared_prefix_nested_bucketed",
+        custom_cache_key=cache_key,
+    )
+    if cache_path.exists():
+        print(f"\nLoading cached generated input data from {cache_path}")
+        with open(cache_path, "rb") as f:
+            return pickle.load(f)
+
+    print("\nGenerating nested bucketed shared-prefix dataset...")
+
+    grouped_requests: List[dict[str, List[DatasetRow]]] = []
+    total_input_tokens = 0
+    total_output_tokens = 0
+
+    for _group_idx in tqdm(range(args.gsp_num_groups), desc="Generating base groups"):
+        base_token_ids = gen_prompt_token_ids(tokenizer, long_len)
+        short_prefix = tokenizer.decode(base_token_ids[:short_len])
+        mid_prefix = tokenizer.decode(base_token_ids[:mid_len])
+        long_prefix = tokenizer.decode(base_token_ids[:long_len])
+
+        short_rows: List[DatasetRow] = []
+        mid_rows: List[DatasetRow] = []
+        long_rows: List[DatasetRow] = []
+
+        for _ in range(short_variants):
+            question = gen_prompt(tokenizer, args.gsp_question_len)
+            full_prompt = f"{short_prefix}\n\n{question}"
+            prompt_len = len(tokenizer.encode(full_prompt))
+            short_rows.append(
+                DatasetRow(
+                    prompt=full_prompt,
+                    prompt_len=prompt_len,
+                    output_len=args.gsp_output_len,
+                )
+            )
+            total_input_tokens += prompt_len
+            total_output_tokens += args.gsp_output_len
+
+        for _ in range(mid_variants):
+            question = gen_prompt(tokenizer, args.gsp_question_len)
+            full_prompt = f"{mid_prefix}\n\n{question}"
+            prompt_len = len(tokenizer.encode(full_prompt))
+            mid_rows.append(
+                DatasetRow(
+                    prompt=full_prompt,
+                    prompt_len=prompt_len,
+                    output_len=args.gsp_output_len,
+                )
+            )
+            total_input_tokens += prompt_len
+            total_output_tokens += args.gsp_output_len
+
+        for _ in range(long_variants):
+            question = gen_prompt(tokenizer, args.gsp_question_len)
+            full_prompt = f"{long_prefix}\n\n{question}"
+            prompt_len = len(tokenizer.encode(full_prompt))
+            long_rows.append(
+                DatasetRow(
+                    prompt=full_prompt,
+                    prompt_len=prompt_len,
+                    output_len=args.gsp_output_len,
+                )
+            )
+            total_input_tokens += prompt_len
+            total_output_tokens += args.gsp_output_len
+
+        grouped_requests.append({"short": short_rows, "mid": mid_rows, "long": long_rows})
+
+    nested_requests: List[DatasetRow] = []
+    if order == "phased":
+        for phase_idx in range(long_variants):
+            nested_requests.extend(group["long"][phase_idx] for group in grouped_requests)
+            nested_requests.extend(
+                group["short"][2 * phase_idx] for group in grouped_requests
+            )
+            nested_requests.extend(
+                group["short"][2 * phase_idx + 1] for group in grouped_requests
+            )
+            nested_requests.extend(group["mid"][phase_idx] for group in grouped_requests)
+    elif order == "grouped":
+        for group in grouped_requests:
+            nested_requests.extend(group["short"])
+            nested_requests.extend(group["mid"])
+            nested_requests.extend(group["long"])
+    elif order == "shuffled":
+        for group in grouped_requests:
+            nested_requests.extend(group["short"])
+            nested_requests.extend(group["mid"])
+            nested_requests.extend(group["long"])
+        random.shuffle(nested_requests)
+    else:
+        raise ValueError(f"Unknown nested order: {order}")
+
+    if args.num_prompts and args.num_prompts != total_prompts:
+        print(
+            f"Warning: --num-prompts={args.num_prompts} does not match "
+            f"gsp_num_groups * gsp_prompts_per_group = {total_prompts}. "
+            "Using generated nested dataset size."
+        )
+
+    print("\nGenerated nested bucketed shared-prefix dataset:")
+    print(f"Base groups: {args.gsp_num_groups}")
+    print(f"Prompts per base group: {args.gsp_prompts_per_group}")
+    print(f"Total prompts: {len(nested_requests)}")
+    print(
+        f"Short prefix length: {short_len} tokens, variants/group: {short_variants}"
+    )
+    print(f"Mid prefix length: {mid_len} tokens, variants/group: {mid_variants}")
+    print(f"Long prefix length: {long_len} tokens, variants/group: {long_variants}")
+    print(f"Question length: {args.gsp_question_len} tokens")
+    print(f"Output length: {args.gsp_output_len} tokens")
+    print(f"Order: {order}")
+    print(f"Total input tokens: {total_input_tokens}")
+    print(f"Total output tokens: {total_output_tokens}")
+
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    print(f"Caching generated input data to {cache_path}")
+    with open(cache_path, "wb") as f:
+        pickle.dump(nested_requests, f)
+
+    return nested_requests
 
 
 async def get_request(
@@ -2327,6 +2495,7 @@ async def benchmark(
     host_backup_avg_len = None
     host_backup_skipped_by_length_count = None
     host_backup_skipped_by_length_tokens = None
+    host_hit_tokens = None
     if (
         "sglang" in backend
         and "server_info_json" in locals()
@@ -2343,6 +2512,7 @@ async def benchmark(
         host_backup_skipped_by_length_tokens = internal_state.get(
             "host_backup_skipped_by_length_tokens"
         )
+        host_hit_tokens = internal_state.get("host_hit_tokens")
         if host_backup_count is not None:
             print(
                 "{:<40} {:<10}".format(
@@ -2376,6 +2546,13 @@ async def benchmark(
                 "{:<40} {:<10}".format(
                     "Host backup skipped tokens:",
                     host_backup_skipped_by_length_tokens,
+                )
+            )
+        if host_hit_tokens is not None:
+            print(
+                "{:<40} {:<10}".format(
+                    "Host hit tokens:",
+                    host_hit_tokens,
                 )
             )
     print("{:<40} {:<10.2f}".format("Concurrency:", metrics.concurrency))
@@ -2467,6 +2644,7 @@ async def benchmark(
             "host_backup_avg_len": host_backup_avg_len,
             "host_backup_skipped_by_length_count": host_backup_skipped_by_length_count,
             "host_backup_skipped_by_length_tokens": host_backup_skipped_by_length_tokens,
+            "host_hit_tokens": host_hit_tokens,
         }
     else:
         print(f"Error running benchmark for request rate: {request_rate}")
@@ -2781,6 +2959,7 @@ if __name__ == "__main__":
             "random-ids",
             "generated-shared-prefix",
             "generated-shared-prefix-bucketed",
+            "generated-shared-prefix-nested-bucketed",
             "mmmu",
             "image",
             "mooncake",
@@ -3096,6 +3275,31 @@ if __name__ == "__main__":
         choices=["shuffle", "interleave"],
         default="interleave",
         help="How to combine bucketed shared-prefix requests into the final workload.",
+    )
+    group.add_argument(
+        "--gsp-nested-short-len",
+        type=int,
+        default=512,
+        help="Short nested prefix length for generated-shared-prefix-nested-bucketed.",
+    )
+    group.add_argument(
+        "--gsp-nested-mid-len",
+        type=int,
+        default=2048,
+        help="Mid nested prefix length for generated-shared-prefix-nested-bucketed.",
+    )
+    group.add_argument(
+        "--gsp-nested-long-len",
+        type=int,
+        default=6144,
+        help="Long nested prefix length for generated-shared-prefix-nested-bucketed.",
+    )
+    group.add_argument(
+        "--gsp-nested-order",
+        type=str,
+        choices=["phased", "grouped", "shuffled"],
+        default="phased",
+        help="Ordering strategy for generated-shared-prefix-nested-bucketed.",
     )
     mooncake_group = parser.add_argument_group("mooncake dataset arguments")
     mooncake_group.add_argument(
