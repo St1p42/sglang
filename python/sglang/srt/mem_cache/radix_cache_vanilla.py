@@ -24,6 +24,7 @@ The radix tree data structure for managing the KV cache.
 
 import heapq
 import logging
+import os
 import sys
 import time
 from collections import defaultdict
@@ -33,6 +34,20 @@ from typing import TYPE_CHECKING, Any, Iterator, List, Optional, Tuple, Union
 import torch
 
 logger = logging.getLogger(__name__)
+TRACE_RADIX_LOGS = os.getenv("SGLANG_TRACE_RADIX_LOGS", "").lower() in {
+    "1",
+    "true",
+    "yes",
+}
+_logger_warning = logger.warning
+
+
+def _trace_warning(*args, **kwargs):
+    if TRACE_RADIX_LOGS:
+        _logger_warning(*args, **kwargs)
+
+
+logger.warning = _trace_warning
 
 from sglang.srt.disaggregation.kv_events import (
     AllBlocksCleared,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import logging
+import os
 import time
 from typing import Any, Optional
 
@@ -13,6 +14,20 @@ from sglang.srt.mem_cache.radix_cache_vanilla import RadixKey
 
 
 logger = logging.getLogger(__name__)
+TRACE_RADIX_LOGS = os.getenv("SGLANG_TRACE_RADIX_LOGS", "").lower() in {
+    "1",
+    "true",
+    "yes",
+}
+_logger_warning = logger.warning
+
+
+def _trace_warning(*args, **kwargs):
+    if TRACE_RADIX_LOGS:
+        _logger_warning(*args, **kwargs)
+
+
+logger.warning = _trace_warning
 
 
 @dataclass
