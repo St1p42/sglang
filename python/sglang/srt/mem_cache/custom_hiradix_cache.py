@@ -95,9 +95,11 @@ class CustomHiRadixCache(RadixCache):
             1, getattr(server_args, "hicache_min_backup_len", 128)
         )
         self.load_back_threshold = 10
-        self.cpu_admit_total_tokens = 0
-        self.cpu_admit_num_events = 0
-        self.cpu_admit_total_span_len = 0
+        self.host_backup_tokens = 0
+        self.host_backup_count = 0
+        self.host_backup_total_span_len = 0
+        self.host_backup_skipped_by_length_count = 0
+        self.host_backup_skipped_by_length_tokens = 0
 
         super().__init__(params=params)
         self.evictable_size_ = self.impl.evictable_size_
@@ -347,25 +349,38 @@ class CustomHiRadixCache(RadixCache):
             return 0
 
         self._set_host_indices(node, backup_indices)
-        self.cpu_admit_total_tokens += admit_len
-        self.cpu_admit_num_events += 1
-        self.cpu_admit_total_span_len += admit_len
+        self.host_backup_tokens += admit_len
+        self.host_backup_count += 1
+        self.host_backup_total_span_len += admit_len
         self.ongoing_write_through[id(node)] = node
         if not write_back:
             self.inc_lock_ref(node)
         return len(backup_indices)
 
     def get_runtime_stats(self) -> dict[str, float | int]:
-        avg_cpu_admit_len = (
-            self.cpu_admit_total_span_len / self.cpu_admit_num_events
-            if self.cpu_admit_num_events > 0
+        avg_host_backup_len = (
+            self.host_backup_total_span_len / self.host_backup_count
+            if self.host_backup_count > 0
             else 0.0
         )
         return {
-            "hicache_cpu_admit_total_tokens": int(self.cpu_admit_total_tokens),
-            "hicache_cpu_admit_events": int(self.cpu_admit_num_events),
-            "hicache_cpu_admit_avg_len": float(avg_cpu_admit_len),
+            "host_backup_count": int(self.host_backup_count),
+            "host_backup_tokens": int(self.host_backup_tokens),
+            "host_backup_avg_len": float(avg_host_backup_len),
+            "host_backup_skipped_by_length_count": int(
+                self.host_backup_skipped_by_length_count
+            ),
+            "host_backup_skipped_by_length_tokens": int(
+                self.host_backup_skipped_by_length_tokens
+            ),
         }
+
+    def _record_length_gate_skip(self, node: _CustomRadixNode) -> None:
+        if self.custom_backup_policy != "length_gated":
+            return
+        skip_len = self._node_token_len(node)
+        self.host_backup_skipped_by_length_count += 1
+        self.host_backup_skipped_by_length_tokens += skip_len
 
     def _should_backup_to_host(self, node: _CustomRadixNode) -> bool:
         if self.custom_backup_policy == "baseline":
@@ -377,12 +392,11 @@ class CustomHiRadixCache(RadixCache):
             return
 
         node.hit_count += 1
-        if (
-            not self._node_is_backuped(node)
-            and self._should_backup_to_host(node)
-            and node.hit_count >= self.write_through_threshold
-        ):
-            self.write_backup(node)
+        if not self._node_is_backuped(node) and node.hit_count >= self.write_through_threshold:
+            if self._should_backup_to_host(node):
+                self.write_backup(node)
+            else:
+                self._record_length_gate_skip(node)
 
     def writing_check(self, write_back=False):
         if write_back:
@@ -507,6 +521,7 @@ class CustomHiRadixCache(RadixCache):
                         num_evicted += self.write_backup(node, write_back=True)
                         write_back_nodes.append(node)
                     else:
+                        self._record_length_gate_skip(node)
                         num_evicted += self._evict_regular(node)
                 else:
                     num_evicted += self._evict_regular(node)

@@ -2322,8 +2322,11 @@ async def benchmark(
             "Total token throughput (tok/s):", metrics.total_throughput
         )
     )
-    hicache_cpu_admit_total_tokens = None
-    hicache_cpu_admit_avg_len = None
+    host_backup_count = None
+    host_backup_tokens = None
+    host_backup_avg_len = None
+    host_backup_skipped_by_length_count = None
+    host_backup_skipped_by_length_tokens = None
     if (
         "sglang" in backend
         and "server_info_json" in locals()
@@ -2331,22 +2334,48 @@ async def benchmark(
         and server_info_json["internal_states"]
     ):
         internal_state = server_info_json["internal_states"][0]
-        hicache_cpu_admit_total_tokens = internal_state.get(
-            "hicache_cpu_admit_total_tokens"
+        host_backup_count = internal_state.get("host_backup_count")
+        host_backup_tokens = internal_state.get("host_backup_tokens")
+        host_backup_avg_len = internal_state.get("host_backup_avg_len")
+        host_backup_skipped_by_length_count = internal_state.get(
+            "host_backup_skipped_by_length_count"
         )
-        hicache_cpu_admit_avg_len = internal_state.get("hicache_cpu_admit_avg_len")
-        if hicache_cpu_admit_total_tokens is not None:
+        host_backup_skipped_by_length_tokens = internal_state.get(
+            "host_backup_skipped_by_length_tokens"
+        )
+        if host_backup_count is not None:
             print(
                 "{:<40} {:<10}".format(
-                    "HiCache CPU admitted tokens:",
-                    hicache_cpu_admit_total_tokens,
+                    "Host backup count:",
+                    host_backup_count,
                 )
             )
-        if hicache_cpu_admit_avg_len is not None:
+        if host_backup_tokens is not None:
+            print(
+                "{:<40} {:<10}".format(
+                    "Host backup tokens:",
+                    host_backup_tokens,
+                )
+            )
+        if host_backup_avg_len is not None:
             print(
                 "{:<40} {:<10.2f}".format(
-                    "HiCache CPU avg admit len:",
-                    hicache_cpu_admit_avg_len,
+                    "Host backup avg len:",
+                    host_backup_avg_len,
+                )
+            )
+        if host_backup_skipped_by_length_count is not None:
+            print(
+                "{:<40} {:<10}".format(
+                    "Host backup skipped count:",
+                    host_backup_skipped_by_length_count,
+                )
+            )
+        if host_backup_skipped_by_length_tokens is not None:
+            print(
+                "{:<40} {:<10}".format(
+                    "Host backup skipped tokens:",
+                    host_backup_skipped_by_length_tokens,
                 )
             )
     print("{:<40} {:<10.2f}".format("Concurrency:", metrics.concurrency))
@@ -2433,8 +2462,11 @@ async def benchmark(
             "accept_length": accept_length,
             "max_output_tokens_per_s": metrics.max_output_tokens_per_s,
             "max_concurrent_requests": metrics.max_concurrent_requests,
-            "hicache_cpu_admit_total_tokens": hicache_cpu_admit_total_tokens,
-            "hicache_cpu_admit_avg_len": hicache_cpu_admit_avg_len,
+            "host_backup_count": host_backup_count,
+            "host_backup_tokens": host_backup_tokens,
+            "host_backup_avg_len": host_backup_avg_len,
+            "host_backup_skipped_by_length_count": host_backup_skipped_by_length_count,
+            "host_backup_skipped_by_length_tokens": host_backup_skipped_by_length_tokens,
         }
     else:
         print(f"Error running benchmark for request rate: {request_rate}")
