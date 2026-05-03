@@ -22,6 +22,7 @@ from sglang.srt.mem_cache.radix_cache_vanilla import (
     _key_match_paged,
     get_child_key,
 )
+from sglang.srt.mem_cache.radix_cache_custom import _CustomRadixNode
 from sglang.srt.mem_cache.radix_cache import (
     RadixCache,
     RadixKey,
@@ -50,6 +51,7 @@ class VanillaHiRadixCache(RadixCache):
                 )
 
         self.page_size = params.page_size
+        self.using_custom_radix = getattr(params, "radix_cache_impl", "vanilla") == "custom"
         self.kv_cache = params.token_to_kv_pool_allocator.get_kvcache()
         if isinstance(self.kv_cache, MHATokenToKVPool):
             self.token_to_kv_pool_host = MHATokenToKVPoolHost(
@@ -173,6 +175,16 @@ class VanillaHiRadixCache(RadixCache):
         node.value = value
         if is_custom_node:
             node.evicted = node is not self.root_node and value is None
+
+    def _new_node(self, priority: int = 0, key: Optional[RadixKey] = None):
+        if self.using_custom_radix:
+            token_segment = ()
+            if key is not None:
+                token_segment = tuple(key.token_ids)
+            node = _CustomRadixNode(token_segment=token_segment)
+            node.priority = priority
+            return node
+        return TreeNode(priority=priority)
 
     def _parse_storage_backend_extra_config(
         self, storage_backend_extra_config: Optional[str]
@@ -826,7 +838,7 @@ class VanillaHiRadixCache(RadixCache):
                 child_key = self.get_child_key_fn(key)
 
         if len(key):
-            new_node = TreeNode(priority=node.priority)
+            new_node = self._new_node(priority=node.priority, key=key)
             new_node.parent = node
             new_node.key = key
             new_node.value = None
@@ -868,7 +880,7 @@ class VanillaHiRadixCache(RadixCache):
     def _split_node(self, key: RadixKey, child: TreeNode, split_len: int):
         self._ensure_node_state(child)
         # child node split into new_node -> child
-        new_node = TreeNode(priority=child.priority)
+        new_node = self._new_node(priority=child.priority, key=child.key[:split_len])
         new_node.children = {self.get_child_key_fn(key[split_len:]): child}
         new_node.parent = child.parent
         new_node.lock_ref = child.lock_ref
@@ -949,7 +961,7 @@ class VanillaHiRadixCache(RadixCache):
                 child_key = self.get_child_key_fn(key)
 
         if len(key):
-            new_node = TreeNode(priority=priority)
+            new_node = self._new_node(priority=priority, key=key)
             new_node.parent = node
             new_node.key = key
             self._set_device_indices(new_node, value)
