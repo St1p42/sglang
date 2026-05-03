@@ -89,7 +89,7 @@ class CustomHiRadixCache(RadixCache):
             1 if server_args.hicache_write_policy == "write_through" else 2
         )
         self.custom_backup_policy = getattr(
-            server_args, "hicache_custom_backup_policy", "length_gated"
+            server_args, "hicache_custom_backup_policy", "baseline"
         )
         self.min_backup_len = max(
             1, getattr(server_args, "hicache_min_backup_len", 128)

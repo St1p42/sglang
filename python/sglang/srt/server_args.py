@@ -438,7 +438,7 @@ class ServerArgs:
     # Hierarchical cache
     enable_hierarchical_cache: bool = False
     hicache_impl: str = "vanilla"
-    hicache_custom_backup_policy: str = "length_gated"
+    hicache_custom_backup_policy: str = "baseline"
     hicache_min_backup_len: int = 128
     hicache_ratio: float = 2.0
     hicache_size: int = 0
