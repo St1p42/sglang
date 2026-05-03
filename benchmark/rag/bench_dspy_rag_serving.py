@@ -4,6 +4,7 @@ import json
 import time
 from collections import defaultdict
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import aiohttp
@@ -359,6 +360,27 @@ def load_workload_jsonl(path: str, max_requests: Optional[int] = None) -> List[W
         raise ValueError(f'No workload rows loaded from {path}')
 
     return rows
+
+
+def resolve_dataset_file(path: str) -> str:
+    candidate = Path(path).expanduser()
+    if candidate.exists():
+        return str(candidate)
+
+    script_dir = Path(__file__).resolve().parent
+    fallbacks = [
+        script_dir / candidate,
+        script_dir / 'workloads' / candidate.name,
+    ]
+
+    for fallback in fallbacks:
+        if fallback.exists():
+            return str(fallback)
+
+    searched = ', '.join(str(p) for p in [candidate, *fallbacks])
+    raise FileNotFoundError(
+        f'Could not find dataset file {path!r}. Tried: {searched}'
+    )
 
 # ---------------------------------------------------------------------------
 # Async request loop (unchanged)
@@ -751,16 +773,17 @@ def main():
     workload_rows: Optional[List[WorkloadRow]] = None
 
     if args.dataset_file:
-        workload_rows = load_workload_jsonl(args.dataset_file, max_requests=args.max_requests)
+        dataset_file = resolve_dataset_file(args.dataset_file)
+        workload_rows = load_workload_jsonl(dataset_file, max_requests=args.max_requests)
         questions = [row.request_id for row in workload_rows]  # used only for summaries/alignment
         gt_answers = [row.answer for row in workload_rows]
         rag = None
         retriever_info = {
             'type': 'prebuilt_jsonl_prompts',
-            'dataset_file': args.dataset_file,
+            'dataset_file': dataset_file,
             'max_requests': args.max_requests,
         }
-        print(f'[dataset] Loaded {len(workload_rows)} prebuilt prompts from {args.dataset_file}')
+        print(f'[dataset] Loaded {len(workload_rows)} prebuilt prompts from {dataset_file}')
         print('[dataset] JSONL row order is preserved when creating async tasks.')
     else:
         questions, gt_answers = make_dataset(args.num_questions)
