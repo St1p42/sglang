@@ -755,7 +755,8 @@ class VanillaHiRadixCache(RadixCache):
         last_host_node = last_node
         while last_node.evicted:
             self._ensure_node_state(last_node)
-            host_hit_length += len(last_node.host_value)
+            if last_node.host_value is not None:
+                host_hit_length += len(last_node.host_value)
             last_node = last_node.parent
             self._ensure_node_state(last_node)
         while last_host_node is not self.root_node and not last_host_node.backuped:
