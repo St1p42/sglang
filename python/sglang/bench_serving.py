@@ -1832,18 +1832,42 @@ def sample_generated_shared_prefix_nested_bucketed_requests(
         raise ValueError(
             "Nested shared-prefix lengths must satisfy short < mid < long."
         )
-    if args.gsp_prompts_per_group % 4 != 0:
-        raise ValueError("--gsp-prompts-per-group must be divisible by 4.")
-
-    short_variants = args.gsp_prompts_per_group // 2
-    mid_variants = args.gsp_prompts_per_group // 4
-    long_variants = args.gsp_prompts_per_group // 4
+    custom_variant_counts = [
+        args.gsp_nested_short_variants,
+        args.gsp_nested_mid_variants,
+        args.gsp_nested_long_variants,
+    ]
+    if any(v is not None for v in custom_variant_counts):
+        if not all(v is not None for v in custom_variant_counts):
+            raise ValueError(
+                "Set all of --gsp-nested-short-variants, "
+                "--gsp-nested-mid-variants, and --gsp-nested-long-variants together."
+            )
+        short_variants = args.gsp_nested_short_variants
+        mid_variants = args.gsp_nested_mid_variants
+        long_variants = args.gsp_nested_long_variants
+        if min(short_variants, mid_variants, long_variants) <= 0:
+            raise ValueError("Nested variant counts must all be positive.")
+        expected_prompts_per_group = short_variants + mid_variants + long_variants
+        if args.gsp_prompts_per_group != expected_prompts_per_group:
+            raise ValueError(
+                "--gsp-prompts-per-group must equal the sum of "
+                "--gsp-nested-*-variants "
+                f"({expected_prompts_per_group})."
+            )
+    else:
+        if args.gsp_prompts_per_group % 4 != 0:
+            raise ValueError("--gsp-prompts-per-group must be divisible by 4.")
+        short_variants = args.gsp_prompts_per_group // 2
+        mid_variants = args.gsp_prompts_per_group // 4
+        long_variants = args.gsp_prompts_per_group // 4
     total_prompts = args.gsp_num_groups * args.gsp_prompts_per_group
 
     cache_key = (
         "gen_shared_prefix_nested_bucketed_"
         f"{args.seed}_{args.gsp_num_groups}_{args.gsp_prompts_per_group}_"
-        f"{short_len}_{mid_len}_{long_len}_{args.gsp_question_len}_{args.gsp_output_len}_{order}"
+        f"{short_len}_{mid_len}_{long_len}_{args.gsp_question_len}_{args.gsp_output_len}_{order}_"
+        f"{short_variants}_{mid_variants}_{long_variants}"
     )
     cache_path = get_gen_prefix_cache_path(
         args,
@@ -1918,15 +1942,38 @@ def sample_generated_shared_prefix_nested_bucketed_requests(
 
     nested_requests: List[DatasetRow] = []
     if order == "phased":
-        for phase_idx in range(long_variants):
-            nested_requests.extend(group["long"][phase_idx] for group in grouped_requests)
-            nested_requests.extend(
-                group["short"][2 * phase_idx] for group in grouped_requests
-            )
-            nested_requests.extend(
-                group["short"][2 * phase_idx + 1] for group in grouped_requests
-            )
-            nested_requests.extend(group["mid"][phase_idx] for group in grouped_requests)
+        if short_variants == 2 * long_variants and mid_variants == long_variants:
+            for phase_idx in range(long_variants):
+                nested_requests.extend(
+                    group["long"][phase_idx] for group in grouped_requests
+                )
+                nested_requests.extend(
+                    group["short"][2 * phase_idx] for group in grouped_requests
+                )
+                nested_requests.extend(
+                    group["short"][2 * phase_idx + 1] for group in grouped_requests
+                )
+                nested_requests.extend(
+                    group["mid"][phase_idx] for group in grouped_requests
+                )
+        else:
+            phased_pattern = ["long", "short", "long", "mid", "long"]
+            group_offsets = [{"short": 0, "mid": 0, "long": 0} for _ in grouped_requests]
+
+            while True:
+                made_progress = False
+                for bucket_name in phased_pattern:
+                    ready_rows = []
+                    for group_idx, group in enumerate(grouped_requests):
+                        offset = group_offsets[group_idx][bucket_name]
+                        if offset < len(group[bucket_name]):
+                            ready_rows.append(group[bucket_name][offset])
+                            group_offsets[group_idx][bucket_name] += 1
+                    if ready_rows:
+                        nested_requests.extend(ready_rows)
+                        made_progress = True
+                if not made_progress:
+                    break
     elif order == "grouped":
         for group in grouped_requests:
             nested_requests.extend(group["short"])
@@ -3300,6 +3347,24 @@ if __name__ == "__main__":
         choices=["phased", "grouped", "shuffled"],
         default="phased",
         help="Ordering strategy for generated-shared-prefix-nested-bucketed.",
+    )
+    group.add_argument(
+        "--gsp-nested-short-variants",
+        type=int,
+        default=None,
+        help="Optional explicit short-prefix requests per group for generated-shared-prefix-nested-bucketed.",
+    )
+    group.add_argument(
+        "--gsp-nested-mid-variants",
+        type=int,
+        default=None,
+        help="Optional explicit mid-prefix requests per group for generated-shared-prefix-nested-bucketed.",
+    )
+    group.add_argument(
+        "--gsp-nested-long-variants",
+        type=int,
+        default=None,
+        help="Optional explicit long-prefix requests per group for generated-shared-prefix-nested-bucketed.",
     )
     mooncake_group = parser.add_argument_group("mooncake dataset arguments")
     mooncake_group.add_argument(
