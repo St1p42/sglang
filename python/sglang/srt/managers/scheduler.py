@@ -2294,6 +2294,10 @@ class Scheduler(
         if RECORD_STEP_TIME:
             ret["step_time_dict"] = self.step_time_dict
 
+        tree_cache_stats = getattr(self.tree_cache, "get_runtime_stats", None)
+        if callable(tree_cache_stats):
+            ret.update(tree_cache_stats())
+
         # This field is not serializable.
         ret.pop("model_config", None)
 

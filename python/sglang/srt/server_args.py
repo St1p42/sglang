@@ -437,6 +437,9 @@ class ServerArgs:
 
     # Hierarchical cache
     enable_hierarchical_cache: bool = False
+    hicache_impl: str = "vanilla"
+    hicache_custom_backup_policy: str = "baseline"
+    hicache_min_backup_len: int = 128
     hicache_ratio: float = 2.0
     hicache_size: int = 0
     hicache_write_policy: str = "write_through"
@@ -3210,6 +3213,26 @@ class ServerArgs:
             "--enable-hierarchical-cache",
             action="store_true",
             help="Enable hierarchical cache",
+        )
+        parser.add_argument(
+            "--hicache-impl",
+            type=str,
+            choices=["vanilla", "custom"],
+            default=ServerArgs.hicache_impl,
+            help="Choose the HiCache implementation to use when hierarchical cache is enabled.",
+        )
+        parser.add_argument(
+            "--hicache-custom-backup-policy",
+            type=str,
+            choices=["baseline", "length_gated"],
+            default=ServerArgs.hicache_custom_backup_policy,
+            help="Backup policy used only by the custom HiCache implementation.",
+        )
+        parser.add_argument(
+            "--hicache-min-backup-len",
+            type=int,
+            default=ServerArgs.hicache_min_backup_len,
+            help="Minimum KV span length eligible for host backup in the custom HiCache implementation.",
         )
         parser.add_argument(
             "--hicache-ratio",

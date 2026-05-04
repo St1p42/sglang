@@ -12,6 +12,8 @@ SGLang HiCache extends the traditional RadixAttention with a three-tier hierarch
 # Essential HiCache flags
 --page-size 64                        # Page size for cache management
 --enable-hierarchical-cache           # Enable HiCache
+--hicache-impl vanilla               # Baseline HiCache implementation
+# or: --hicache-impl custom          # Experimental HiCache implementation
 --hicache-ratio 2                     # Host memory ratio (2x GPU memory)
 --hicache-size 100                    # Host memory size in GBs, will override the above ratio
 --hicache-io-backend kernel           # The I/O backend of moving data between CPU and GPU
